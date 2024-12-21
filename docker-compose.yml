@@ -1,0 +1,11 @@
+services:
+  youtube_grup_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: youtube_grup_bot
+    restart: always
+    volumes:
+      - .:/app
+    env_file:
+      - ./.env

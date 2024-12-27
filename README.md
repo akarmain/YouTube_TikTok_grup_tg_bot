@@ -1,6 +1,6 @@
-# YouTube_grup_bot
+# YouTube_TikTok_grup_tg_bot
 
-### Telegram бот для скачивания YouTube shorts в группах
+### Telegram бот для скачивания YouTube shorts и TikTok
 
 <img alt="demo.gif" src="demo.gif" width="512"/>
 

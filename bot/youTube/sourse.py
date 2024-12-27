@@ -4,7 +4,7 @@ import re
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from bot.settings import CACHE_DIR
+from bot.settings import CACHE_DIR, YOUTUBE_COOKIES
 
 
 def get_youtube_video_id(url: str) -> str:
@@ -31,7 +31,7 @@ async def get_best_video_format(yt_url: str) -> int:
     loop = asyncio.get_event_loop()
 
     def extract_best_format():
-        with YoutubeDL({"quiet": True}) as ydl:
+        with YoutubeDL({"quiet": True, "cookiefile": YOUTUBE_COOKIES}) as ydl:
             info = ydl.extract_info(yt_url, download=False)
             formats = info.get("formats", [])
             # Фильтруем форматы по условиям
@@ -74,6 +74,7 @@ async def download_video(yt_url, format_id) -> str:
         options = {
             "format": f"{format_id}+bestaudio[ext=m4a]/mp4",
             "merge_output_format": "mp4",
+            "cookiefile": YOUTUBE_COOKIES,
             "quiet": True,
             "postprocessors": [
                 {
@@ -94,7 +95,7 @@ async def download_video(yt_url, format_id) -> str:
     return output_file.get("path")
 
 
-async def get_video_dimensions(yt_url: str) -> dict:
+async def get_tiktok_video_dimensions(yt_url: str) -> dict:
     """
     Извлекает высоту и ширину видео с YouTube по его ID.
 
@@ -104,7 +105,7 @@ async def get_video_dimensions(yt_url: str) -> dict:
     loop = asyncio.get_event_loop()
 
     def extract_dimensions():
-        with YoutubeDL({"quiet": True}) as ydl:
+        with YoutubeDL({"quiet": True, "cookiefile": YOUTUBE_COOKIES}) as ydl:
             info = ydl.extract_info(yt_url, download=False)
             formats = info.get("formats", [])
             for fmt in formats:
@@ -116,6 +117,75 @@ async def get_video_dimensions(yt_url: str) -> dict:
     return dimensions
 
 
+async def get_best_tiktok_video_format(tt_url: str) -> int:
+    """
+    Возвращает лучший формат видео из TikTok.
+
+    :param tt_url: URL видео TikTok
+    :return: format_id лучшего качества видео
+    """
+    loop = asyncio.get_event_loop()
+
+    def extract_best_format():
+        with YoutubeDL({"quiet": True}) as ydl:
+            info = ydl.extract_info(tt_url, download=False)
+            formats = info.get("formats", [])
+            # Выбор форматов с видео
+            video_formats = [
+                {
+                    "format_id": fmt["format_id"],
+                    "resolution": fmt.get("height", 0),
+                    "filesize": fmt.get("filesize", 0),
+                }
+                for fmt in formats
+                if fmt.get("vcodec") != "none"
+            ]
+            # Сортировка форматов по разрешению
+            best_format = max(video_formats, key=lambda x: x["resolution"], default=None)
+
+            return best_format["format_id"] if best_format else None
+
+    format_id = await loop.run_in_executor(None, extract_best_format)
+    return format_id
+
+
+async def download_tiktok_video(tt_url: str, format_id: int) -> str:
+    """
+    Загружает видео TikTok по указанному URL и формату.
+
+    :param tt_url: Ссылка на TikTok видео
+    :param format_id: Идентификатор формата для загрузки
+    :return: Путь к сохраненному файлу
+    """
+    loop = asyncio.get_event_loop()
+    output_file = {}
+
+    def extract_and_download():
+        options = {
+            "format": f"{format_id}",
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "outtmpl": f"{CACHE_DIR}/%(title)s.%(ext)s",
+        }
+        with YoutubeDL(options) as ydl:
+            try:
+                result = ydl.extract_info(tt_url, download=True)
+                output_file["path"] = ydl.prepare_filename(result)
+            except DownloadError as e:
+                raise RuntimeError(f"Download error: {str(e)}")
+
+    await loop.run_in_executor(None, extract_and_download)
+    return output_file.get("path")
+
+
+async def test_tiktok():
+    url = "https://www.tiktok.com/@username/video/1234567890123456789"  # Пример ссылки на TikTok видео
+    best_format = await get_best_tiktok_video_format(url)
+    print("Лучший формат:", best_format)
+    downloaded_path = await download_tiktok_video(url, best_format)
+    print("Видео сохранено в:", downloaded_path)
+
+
 async def test():
     url = "https://youtube.com/shorts/ntrQfA47n1s?si=1l6P6KNrjHkQynMw"  # Видео от моих лучших друзей
     t = await get_best_video_format(url)
@@ -124,4 +194,5 @@ async def test():
 
 
 if __name__ == "__main__":
+    asyncio.run(test_tiktok())
     asyncio.run(test())

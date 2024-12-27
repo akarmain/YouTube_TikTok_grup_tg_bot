@@ -242,3 +242,4 @@ cython_debug/
 #.idea/
 
 !/bot/database/log.log
+!/bot/youTube/cookies.txt

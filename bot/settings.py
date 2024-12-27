@@ -24,3 +24,5 @@ ALL_COMMANDS = {
 BASIC_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASIC_DIR, "bot", "cache")
 Env = Env()
+YOUTUBE_COOKIES = os.path.join(BASIC_DIR, "youTube/cookies.txt")
+

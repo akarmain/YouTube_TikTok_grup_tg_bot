@@ -6,7 +6,6 @@
 
 
 ---
-
 ### Используемый стек технологий
 
 - **Python 3.11+**
@@ -38,6 +37,9 @@ cd YouTube_grup_bot
 ```bash
 cp example.env .env
 ```
+
+#### 3.1. Для большей стабильности сохраните ютуб куки в youTube/cookies.txt
+[Подробнее](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
 
 #### 3. Запустите проект через Docker Compose
 

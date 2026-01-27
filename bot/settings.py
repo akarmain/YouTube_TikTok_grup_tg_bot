@@ -22,7 +22,8 @@ ALL_COMMANDS = {
 }
 
 BASIC_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(BASIC_DIR, "bot", "cache")
-Env = Env()
+CACHE_DIR = os.path.join(BASIC_DIR, "cache")
 YOUTUBE_COOKIES = os.path.join(BASIC_DIR, "youTube/cookies.txt")
+TIKTOK_COOKIES = os.path.join(BASIC_DIR, "tiktok/cookies.txt")
 
+Env = Env()

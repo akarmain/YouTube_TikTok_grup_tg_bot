@@ -243,3 +243,7 @@ cython_debug/
 
 !/bot/database/log.log
 !/bot/youTube/cookies.txt
+!/bot/tiktok/cookies.txt
+/bot/tiktok/cookies.txt
+/bot/youTube/cookies.txt
+.DS_Store

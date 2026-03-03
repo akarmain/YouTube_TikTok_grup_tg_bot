@@ -173,7 +173,7 @@ def _normalize_for_telegram(path: str) -> str:
     src_path = Path(path)
     normalized_path = src_path.with_name(f"{src_path.stem}.tgfix.mp4")
 
-    command = [
+    strict_command = [
         "ffmpeg",
         "-y",
         "-i",
@@ -214,20 +214,52 @@ def _normalize_for_telegram(path: str) -> str:
         "+faststart",
         str(normalized_path),
     ]
+    relaxed_command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "22",
+        "-r",
+        "30",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(normalized_path),
+    ]
 
-    try:
-        process = subprocess.run(command, capture_output=True, text=True, check=False)
-    except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg not found. Install ffmpeg and retry.") from exc
+    last_output: list[str] = []
+    for command in (strict_command, relaxed_command):
+        try:
+            process = subprocess.run(command, capture_output=True, text=True, check=False)
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg not found. Install ffmpeg and retry.") from exc
 
-    if process.returncode != 0 or not normalized_path.exists():
-        error_output = (process.stderr or process.stdout or "").strip().splitlines()
-        tail = error_output[-1] if error_output else "unknown ffmpeg error"
-        raise RuntimeError(f"ffmpeg normalization failed: {tail}")
+        if process.returncode == 0 and normalized_path.exists():
+            src_path.unlink(missing_ok=True)
+            normalized_path.replace(src_path.with_suffix(".mp4"))
+            return str(src_path.with_suffix(".mp4"))
 
-    src_path.unlink(missing_ok=True)
-    normalized_path.replace(src_path.with_suffix(".mp4"))
-    return str(src_path.with_suffix(".mp4"))
+        output = (process.stderr or process.stdout or "").strip().splitlines()
+        if output:
+            last_output = output
+
+    tail = " | ".join(last_output[-3:]) if last_output else "unknown ffmpeg error"
+    raise RuntimeError(f"ffmpeg normalization failed: {tail}")
 
 
 def _download_video_sync(url: str) -> DownloadedVideo:
@@ -269,7 +301,11 @@ def _download_video_sync(url: str) -> DownloadedVideo:
                 info = ydl.extract_info(url, download=True)
                 filepath = _resolve_output_path(info, ydl)
                 if _needs_telegram_normalization(info):
-                    filepath = _normalize_for_telegram(filepath)
+                    try:
+                        filepath = _normalize_for_telegram(filepath)
+                    except RuntimeError:
+                        # Keep original downloaded file if ffmpeg normalization fails.
+                        pass
                 width, height = _extract_dimensions(info)
                 return DownloadedVideo(path=filepath, width=width, height=height)
             except VideoTooLargeError:

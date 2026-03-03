@@ -1,46 +1,72 @@
 import os
+from contextlib import suppress
+from urllib.parse import urlparse
 
 import loguru
 from aiogram import Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, Message
 
-from bot.youTube.sourse import (
-    VideoFormatError,
-    download_video,
-    get_best_video_format,
-    get_tiktok_video_dimensions,
-)
-
-YOUTUBE_URL_PATTERN = r'^https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)[\w-]+'
+from bot.database.json_db import json_db
+from bot.youTube.sourse import SUPPORTED_URL_PATTERN, DownloadedVideo, VideoTooLargeError, download_best_video
 
 
 def register_handlers(dp: Dispatcher):
-    dp.message.register(get_youtube, F.text.regexp(YOUTUBE_URL_PATTERN))
+    dp.message.register(handle_video_url, F.text.regexp(SUPPORTED_URL_PATTERN))
 
 
-async def get_youtube(msg: Message):
-	
-    temp_msg = await msg.reply("Скачиваю видео ⌛️")
-    
-    url = msg.text
-    file_path = None
+def _detect_platform(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    if "tiktok.com" in host:
+        return "tiktok"
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube"
+    return "unknown"
 
+
+async def handle_video_url(msg: Message):
+    source_url = (msg.text or "").strip()
+    cached_file_id = await json_db.get_cached_file_id(source_url)
+    if cached_file_id:
+        try:
+            sent_msg = await msg.answer_video(video=cached_file_id, supports_streaming=True)
+            if sent_msg.video:
+                await json_db.upsert_video(
+                    source_url=source_url,
+                    file_id=sent_msg.video.file_id,
+                    sender_user_id=msg.from_user.id if msg.from_user else None,
+                    platform=_detect_platform(source_url),
+                )
+            return
+        except TelegramBadRequest:
+            await json_db.invalidate_cached_file_id(source_url)
+        except Exception as e:
+            loguru.logger.exception(e)
+
+    temp_msg = await msg.answer("Скачиваю видео ⌛️")
+    downloaded: DownloadedVideo | None = None
     try:
-        format_info = await get_best_video_format(url)
-        video_dimensions = await get_tiktok_video_dimensions(url)
-        file_path = await download_video(url, format_info)
-        await msg.answer_video(
-            video=FSInputFile(file_path),
+        downloaded = await download_best_video(source_url)
+        sent_msg = await msg.answer_video(
+            video=FSInputFile(downloaded.path),
             supports_streaming=True,
-            width=video_dimensions["width"],
-            height=video_dimensions["height"],
+            width=downloaded.width,
+            height=downloaded.height,
         )
-        await temp_msg.delete()
-    except VideoFormatError as e:
-        await temp_msg.edit_text(f"Не удалось скачать видео: {e}")
+        if sent_msg.video:
+            await json_db.upsert_video(
+                source_url=source_url,
+                file_id=sent_msg.video.file_id,
+                sender_user_id=msg.from_user.id if msg.from_user else None,
+                platform=_detect_platform(source_url),
+            )
+    except VideoTooLargeError as e:
+        await msg.answer(f"Видео слишком большое для обработки. Напиши @akarmain чтобы исправить это: {e}")
     except Exception as e:
         loguru.logger.exception(e)
-        await temp_msg.edit_text("Произошла ошибка при скачивании видео.")
+        await msg.answer("Не удалось скачать видео. Проверьте ссылку и попробуйте снова.")
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        with suppress(Exception):
+            await temp_msg.delete()
+        if downloaded and os.path.exists(downloaded.path):
+            os.remove(downloaded.path)

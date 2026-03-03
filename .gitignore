@@ -241,9 +241,10 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-!/bot/database/log.log
-!/bot/youTube/cookies.txt
-!/bot/tiktok/cookies.txt
-/bot/tiktok/cookies.txt
-/bot/youTube/cookies.txt
+# Runtime files with personal/sensitive data
+bot/youTube/cookies.txt
+bot/database/*.log
+bot/database/users_videos.json
+bot/database/users_export.json
+bot/cache/
 .DS_Store

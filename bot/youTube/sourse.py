@@ -1,424 +1,286 @@
 import asyncio
-import json
 import os
 import re
-import shutil
 import subprocess
-import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from bot.settings import CACHE_DIR, YOUTUBE_COOKIES
+from bot.settings import CACHE_DIR, MAX_VIDEO_SIZE_BYTES, MAX_VIDEO_SIZE_MB, YOUTUBE_COOKIES
+
+MIN_HEIGHT = 420
+SUPPORTED_URL_PATTERN = (
+    r"(?i)^https?://(?:[\w-]+\.)?"
+    r"(?:youtube\.com|youtu\.be|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/\S+$"
+)
+SUPPORTED_URL_RE = re.compile(SUPPORTED_URL_PATTERN)
+
+# Prefer >=420p when available, then fallback to best available stream.
+PREFERRED_FORMAT_SELECTOR = (
+    f"bv*[height>={MIN_HEIGHT}]+ba/"
+    f"b[height>={MIN_HEIGHT}]/"
+    "bv*+ba/"
+    "b"
+)
+FALLBACK_FORMAT_SELECTOR = "bv*+ba/b"
 
 
-class VideoFormatError(RuntimeError):
-    """Raised when we cannot select or download a video format."""
+@dataclass(slots=True)
+class DownloadedVideo:
+    path: str
+    width: int | None
+    height: int | None
 
-def _youtube_option_sets():
-    """
-    Генерирует наборы опций для yt_dlp.
 
-    Первый проход без куков с мобильными клиентами, чтобы избежать n-challenge.
-    Второй проход — с куками (если есть) и web-клиентом для приватных/возрастных видео.
-    """
-    po_token_android = os.getenv("YOUTUBE_PO_TOKEN_ANDROID")
-    po_token_ios = os.getenv("YOUTUBE_PO_TOKEN_IOS")
-    po_tokens = []
-    if po_token_android:
-        po_tokens.append(f"android.gvs+{po_token_android}")
-    if po_token_ios:
-        po_tokens.append(f"ios.gvs+{po_token_ios}")
+class VideoTooLargeError(RuntimeError):
+    pass
 
-    # Включаем EJS для n-challenge: нужны JS рантаймы (deno/node/quickjs/bun) и разрешение на загрузку solver-скриптов.
-    def _parse_js_runtimes(raw: str) -> dict:
-        if not raw:
-            return {}
-        raw = raw.strip()
-        if raw.startswith("{") or raw.startswith("["):
-            try:
-                data = json.loads(raw)
-                if isinstance(data, list):
-                    return {str(item): {} for item in data if str(item).strip()}
-                if isinstance(data, dict):
-                    cleaned = {}
-                    for key, value in data.items():
-                        if value is None or isinstance(value, dict):
-                            cleaned[str(key)] = value
-                        else:
-                            cleaned[str(key)] = {}
-                    return cleaned
-            except json.JSONDecodeError:
-                pass
-        runtimes: dict[str, dict] = {}
-        for item in raw.split(","):
-            item = item.strip()
-            if not item:
-                continue
-            # runtime[:path] — если путь указан, кладём в config
-            if ":" in item:
-                runtime, path = item.split(":", 1)
-                runtimes[runtime] = {"path": path}
-            else:
-                runtimes[item] = {}
-        return runtimes
 
-    js_runtimes = _parse_js_runtimes(os.getenv("YOUTUBE_JS_RUNTIMES", "deno,node,quickjs,bun"))
-    remote_components = [
-        comp.strip() for comp in os.getenv("YOUTUBE_REMOTE_COMPONENTS", "ejs:github").split(",") if comp.strip()
+def is_supported_video_url(url: str) -> bool:
+    return bool(SUPPORTED_URL_RE.match((url or "").strip()))
+
+
+def _is_youtube_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return "youtube.com" in host or "youtu.be" in host
+
+
+def _extract_dimensions(info: dict[str, Any]) -> tuple[int | None, int | None]:
+    width = info.get("width")
+    height = info.get("height")
+    if width and height:
+        return width, height
+
+    for fmt in info.get("requested_formats") or []:
+        fmt_width = fmt.get("width")
+        fmt_height = fmt.get("height")
+        if fmt_width and fmt_height:
+            return fmt_width, fmt_height
+
+    for fmt in info.get("formats") or []:
+        fmt_width = fmt.get("width")
+        fmt_height = fmt.get("height")
+        if fmt_width and fmt_height:
+            return fmt_width, fmt_height
+
+    return None, None
+
+
+def _resolve_output_path(info: dict[str, Any], ydl: YoutubeDL) -> str:
+    candidates: list[Path] = []
+    requested_downloads = info.get("requested_downloads") or []
+    for item in requested_downloads:
+        filepath = item.get("filepath")
+        if filepath:
+            candidates.append(Path(filepath))
+
+    filename = info.get("_filename")
+    if filename:
+        candidates.append(Path(filename))
+
+    prepared_filename = ydl.prepare_filename(info)
+    if prepared_filename:
+        prepared_path = Path(prepared_filename)
+        candidates.append(prepared_path)
+        candidates.append(prepared_path.with_suffix(".mp4"))
+
+    for path in candidates:
+        if path.exists():
+            return str(path)
+
+    raise RuntimeError("Downloaded file was not found on disk.")
+
+
+def _extract_selected_size_bytes(info: dict[str, Any]) -> int | None:
+    total_size = 0
+    found_any = False
+
+    for fmt in info.get("requested_formats") or []:
+        size = fmt.get("filesize") or fmt.get("filesize_approx")
+        if isinstance(size, (int, float)) and size > 0:
+            total_size += int(size)
+            found_any = True
+
+    if found_any:
+        return total_size
+
+    for item in info.get("requested_downloads") or []:
+        size = item.get("filesize") or item.get("filesize_approx")
+        if isinstance(size, (int, float)) and size > 0:
+            total_size += int(size)
+            found_any = True
+
+    if found_any:
+        return total_size
+
+    size = info.get("filesize") or info.get("filesize_approx")
+    if isinstance(size, (int, float)) and size > 0:
+        return int(size)
+    return None
+
+
+def _validate_size_before_download(info: dict[str, Any]) -> None:
+    size_bytes = _extract_selected_size_bytes(info)
+    if size_bytes is None:
+        return
+    if size_bytes > MAX_VIDEO_SIZE_BYTES:
+        size_mb = size_bytes / (1024 * 1024)
+        raise VideoTooLargeError(
+            f"Video is too large: {size_mb:.1f} MB. Limit is {MAX_VIDEO_SIZE_MB} MB."
+        )
+
+
+def _extract_selected_codecs(info: dict[str, Any]) -> tuple[str | None, str | None, float | None]:
+    requested_formats = info.get("requested_formats") or []
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    fps: float | None = None
+
+    for fmt in requested_formats:
+        if not video_codec and fmt.get("vcodec") and fmt.get("vcodec") != "none":
+            video_codec = str(fmt.get("vcodec"))
+            fps = fmt.get("fps")
+        if not audio_codec and fmt.get("acodec") and fmt.get("acodec") != "none":
+            audio_codec = str(fmt.get("acodec"))
+
+    if not video_codec and info.get("vcodec") and info.get("vcodec") != "none":
+        video_codec = str(info.get("vcodec"))
+        fps = info.get("fps")
+    if not audio_codec and info.get("acodec") and info.get("acodec") != "none":
+        audio_codec = str(info.get("acodec"))
+
+    return video_codec, audio_codec, fps
+
+
+def _needs_telegram_normalization(info: dict[str, Any]) -> bool:
+    video_codec, audio_codec, fps = _extract_selected_codecs(info)
+    ext = str(info.get("ext", "")).lower()
+
+    video_ok = bool(video_codec and (video_codec.startswith("avc1") or video_codec.startswith("h264")))
+    audio_ok = audio_codec is None or audio_codec.startswith("mp4a") or audio_codec.startswith("aac")
+    fps_ok = fps is None or float(fps) <= 30.0
+    container_ok = ext == "mp4"
+
+    return not (video_ok and audio_ok and fps_ok and container_ok)
+
+
+def _normalize_for_telegram(path: str) -> str:
+    src_path = Path(path)
+    normalized_path = src_path.with_name(f"{src_path.stem}.tgfix.mp4")
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-level:v",
+        "4.1",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-r",
+        "30",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(normalized_path),
     ]
-
-    has_cookies = os.path.exists(YOUTUBE_COOKIES) and os.path.getsize(YOUTUBE_COOKIES) > 0
-    option_sets = [
-        {
-            "use_cookies": False,
-            # Если нет PO токенов, убираем android/ios HTTPS клиенты, чтобы не ловить 403/всплывающие warning-и.
-            "clients": ["android", "tv_embedded", "web"] if po_tokens else ["tv_embedded", "web"],
-        },
-        {
-            "use_cookies": has_cookies,
-            "clients": ["web", "web_embedded", "tv_embedded"],
-        },
-    ]
-
-    for opt in option_sets:
-        base_opts = {
-            "quiet": True,
-            "extractor_retries": 2,
-            "http_headers": {
-                # Подменяем UA на Android-клиент, чтобы сервер отдавал менее защищенные потоки.
-                "User-Agent": "com.google.android.youtube/19.20.33 (Linux; U; Android 10) gzip",
-            },
-            # Приоритет JS рантаймов и разрешение на загрузку solver-скриптов для n-challenge (EJS).
-            "js_runtimes": js_runtimes,
-            "remote_components": remote_components,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": opt["clients"],
-                },
-            },
-        }
-        if po_tokens:
-            base_opts["extractor_args"]["youtube"]["po_token"] = po_tokens
-        if opt["use_cookies"]:
-            base_opts["cookiefile"] = YOUTUBE_COOKIES
-        yield base_opts
-
-
-def get_youtube_video_id(url: str) -> str:
-    """
-    Extracts the video ID from a YouTube URL.
-
-    :param url: The YouTube video URL (any format).
-    :return: The video ID if found, otherwise an empty string.
-    """
-    # Regular expression to match YouTube video IDs
-    pattern = r"(?:v=|vi=|v%3D|vi%3D|youtu\.be/|/v/|/vi/|/embed/|/shorts/)([a-zA-Z0-9_-]{11})"
-    match = re.search(pattern, url)
-
-    return match.group(1) if match else ""
-
-
-async def get_best_video_format(yt_url: str) -> tuple[str, bool]:
-    """
-    Возвращает формат лучшего видео (format_id, has_audio) без ограничений по качеству.
-
-    :param yt_url: URL YouTube видео
-    :return: Пара (format_id, has_audio)
-    """
-    loop = asyncio.get_event_loop()
-
-    def extract_best_format():
-        last_error = None
-        for opts in _youtube_option_sets():
-            try:
-                with YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(yt_url, download=False)
-                    formats = info.get("formats", [])
-
-                    video_formats = []
-                    for fmt in formats:
-                        if fmt.get("vcodec") == "none":
-                            continue
-                        if not fmt.get("url"):
-                            continue
-                        video_formats.append(
-                            {
-                                "format_id": fmt["format_id"],
-                                "height": fmt.get("height") or 0,
-                                "fps": fmt.get("fps") or 0,
-                                "tbr": fmt.get("tbr") or 0,
-                                "filesize": fmt.get("filesize") or fmt.get("filesize_approx") or 0,
-                                "ext": fmt.get("ext") or "",
-                                "has_audio": fmt.get("acodec") != "none",
-                            }
-                        )
-
-                    if not video_formats:
-                        continue
-
-                    mp4_candidates = [fmt for fmt in video_formats if fmt["ext"] == "mp4"]
-                    candidates = mp4_candidates if mp4_candidates else video_formats
-                    if not candidates:
-                        continue
-
-                    best_format = max(
-                        candidates,
-                        key=lambda x: (
-                            x["height"],
-                            x["fps"],
-                            x["tbr"],
-                            x["filesize"],
-                            x["has_audio"],
-                        ),
-                    )
-                    return best_format["format_id"], best_format["has_audio"]
-            except DownloadError as e:
-                last_error = e
-                continue
-
-        msg = f"Не удалось получить информацию о видео: {last_error}" if last_error else "Не удалось получить информацию о видео: подходящий формат не найден."
-        raise VideoFormatError(msg)
 
     try:
-        return await loop.run_in_executor(None, extract_best_format)
-    except DownloadError as e:
-        raise VideoFormatError(f"Не удалось получить информацию о видео: {e}") from e
+        process = subprocess.run(command, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg not found. Install ffmpeg and retry.") from exc
+
+    if process.returncode != 0 or not normalized_path.exists():
+        error_output = (process.stderr or process.stdout or "").strip().splitlines()
+        tail = error_output[-1] if error_output else "unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg normalization failed: {tail}")
+
+    src_path.unlink(missing_ok=True)
+    normalized_path.replace(src_path.with_suffix(".mp4"))
+    return str(src_path.with_suffix(".mp4"))
 
 
-async def download_video(yt_url: str, format_info: tuple[str, bool]) -> str:
-    """
-    Загружает видео по указанному URL и формату.
+def _download_video_sync(url: str) -> DownloadedVideo:
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
-    :param yt_url: Ссылка на YouTube видео
-    :param format_info: Идентификатор формата и информация о наличии аудио
-    :return: Путь к загруженному файлу
-    """
-    loop = asyncio.get_event_loop()
-    output_file = {}
-    size_limit_mb = int(os.getenv("YOUTUBE_SIZE_LIMIT_MB", 48))
-    size_limit = size_limit_mb * 1024 * 1024  # потолок для отправки
+    base_options: dict[str, Any] = {
+        "merge_output_format": "mp4",
+        "outtmpl": os.path.join(CACHE_DIR, "%(extractor)s_%(id)s.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "restrictfilenames": True,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+        "writeinfojson": False,
+        "writethumbnail": False,
+        "retries": 3,
+        "fragment_retries": 3,
+        "skip_unavailable_fragments": True,
+    }
 
-    if not format_info:
-        raise VideoFormatError("Видео формат не определен, скачивание отменено.")
-    format_id, has_audio = format_info
-    if not format_id:
-        raise VideoFormatError("Видео формат не определен, скачивание отменено.")
+    if _is_youtube_url(url):
+        base_options["remote_components"] = ["ejs:github"]
+        if os.path.isfile(YOUTUBE_COOKIES):
+            base_options["cookiefile"] = YOUTUBE_COOKIES
 
-    def extract_and_download():
-        primary_selector = f"{format_id}" if has_audio else f"{format_id}+bestaudio[ext=m4a]"
-
-        format_selectors = [
-            # Сначала пытаемся получить максимальное качество.
-            "bv*+ba/best",
-            "bv*+ba[ext=m4a]/b[ext=mp4]/best",
-            # Затем пробуем конкретный формат, найденный при анализе.
-            f"{primary_selector}/best",
-            # Безопасный фолбэк.
-            "best[ext=mp4][acodec!=none]/best",
-        ]
-
-        last_error = None
-        for opts in _youtube_option_sets():
-            for selector in format_selectors:
-                options = {
-                    **opts,
-                    "format": selector,
-                    "format_sort": [
-                        "res",
-                        "fps",
-                        "tbr",
-                        "ext:mp4",
-                        "codec:h264",
-                        "proto:https",
-                    ],
-                    "format_sort_force": True,
-                    "merge_output_format": "mp4",
-                    "postprocessors": [
-                        {
-                            "key": "FFmpegVideoConvertor",
-                            "preferedformat": "mp4",
-                        }
-                    ],
-                    "outtmpl": f"{CACHE_DIR}/%(title)s.%(ext)s",
-                }
-                with YoutubeDL(options) as ydl:
-                    try:
-                        result = ydl.extract_info(yt_url, download=True)
-                        output_file["path"] = ydl.prepare_filename(result)
-                        return
-                    except DownloadError as e:
-                        last_error = e
-                        continue
-
-        msg = f"Ошибка скачивания: {str(last_error)}" if last_error else "Ошибка скачивания: подходящий формат не найден."
-        raise VideoFormatError(msg)
-
-    await loop.run_in_executor(None, extract_and_download)
-    file_path = output_file.get("path")
-
-    if not file_path or not os.path.exists(file_path):
-        return file_path
-
-    # Если вышли за лимит — пытаемся максимально сохранить качество и поэтапно уменьшать.
-    if os.path.getsize(file_path) > size_limit:
-        if not shutil.which("ffmpeg"):
-            os.remove(file_path)
-            raise VideoFormatError("Требуется ffmpeg для уменьшения размера видео.")
-
-        base_crf = int(os.getenv("YOUTUBE_FFMPEG_CRF", "22"))
-        presets = [
-            (3840, base_crf),
-            (2560, base_crf + 1),
-            (1920, base_crf + 2),
-            (1280, base_crf + 3),
-            (854, base_crf + 4),
-            (640, base_crf + 6),
-        ]
-
-        def _try_transcode(max_width: int, crf: int) -> str:
-            tmp_out = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-y",
-                "-i", file_path,
-                "-vf", f"scale='min({max_width},iw)':-2",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", str(crf),
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                tmp_out,
-            ]
-            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return tmp_out
-
-        last_error = None
-        for max_width, crf in presets:
-            try:
-                tmp_out = _try_transcode(max_width, crf)
-            except subprocess.CalledProcessError as e:
-                last_error = e
-                continue
-            if os.path.getsize(tmp_out) <= size_limit:
-                os.remove(file_path)
-                os.replace(tmp_out, file_path)
-                break
-            os.remove(tmp_out)
-        else:
-            os.remove(file_path)
-            raise VideoFormatError(f"Видео всё ещё больше {size_limit_mb} МБ после сжатия. {last_error or ''}".strip())
-
-    return file_path
-
-
-async def get_tiktok_video_dimensions(yt_url: str) -> dict:
-    """
-    Извлекает высоту и ширину видео с YouTube по его ID.
-
-    :param yt_url: Ссылка на YouTube видео
-    :return: Словарь с высотой и шириной видео
-    """
-    loop = asyncio.get_event_loop()
-
-    def extract_dimensions():
-        last_error = None
-        for opts in _youtube_option_sets():
-            try:
-                with YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(yt_url, download=False)
-                    formats = info.get("formats", [])
-                    for fmt in formats:
-                        if fmt.get("width") and fmt.get("height"):
-                            return {"width": fmt["width"], "height": fmt["height"]}
-            except DownloadError as e:
-                last_error = e
-                continue
-        if last_error:
-            raise VideoFormatError(f"Не удалось получить размеры видео: {last_error}")
-        return {"width": None, "height": None}
-
-    dimensions = await loop.run_in_executor(None, extract_dimensions)
-    return dimensions
-
-
-async def get_best_tiktok_video_format(tt_url: str) -> int:
-    """
-    Возвращает лучший формат видео из TikTok.
-
-    :param tt_url: URL видео TikTok
-    :return: format_id лучшего качества видео
-    """
-    loop = asyncio.get_event_loop()
-
-    def extract_best_format():
-        with YoutubeDL({"quiet": True}) as ydl:
-            info = ydl.extract_info(tt_url, download=False)
-            formats = info.get("formats", [])
-            # Выбор форматов с видео
-            video_formats = [
-                {
-                    "format_id": fmt["format_id"],
-                    "resolution": fmt.get("height", 0),
-                    "filesize": fmt.get("filesize", 0),
-                }
-                for fmt in formats
-                if fmt.get("vcodec") != "none"
-            ]
-            # Сортировка форматов по разрешению
-            best_format = max(video_formats, key=lambda x: x["resolution"], default=None)
-
-            return best_format["format_id"] if best_format else None
-
-    format_id = await loop.run_in_executor(None, extract_best_format)
-    return format_id
-
-
-async def download_tiktok_video(tt_url: str, format_id: int) -> str:
-    """
-    Загружает видео TikTok по указанному URL и формату.
-
-    :param tt_url: Ссылка на TikTok видео
-    :param format_id: Идентификатор формата для загрузки
-    :return: Путь к сохраненному файлу
-    """
-    loop = asyncio.get_event_loop()
-    output_file = {}
-
-    def extract_and_download():
-        options = {
-            "format": f"{format_id}",
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "outtmpl": f"{CACHE_DIR}/%(title)s.%(ext)s",
-        }
+    last_exc: DownloadError | None = None
+    selectors = (PREFERRED_FORMAT_SELECTOR, FALLBACK_FORMAT_SELECTOR)
+    for index, format_selector in enumerate(selectors):
+        options = {**base_options, "format": format_selector}
         with YoutubeDL(options) as ydl:
             try:
-                result = ydl.extract_info(tt_url, download=True)
-                output_file["path"] = ydl.prepare_filename(result)
-            except DownloadError as e:
-                raise RuntimeError(f"Download error: {str(e)}")
+                probe_info = ydl.extract_info(url, download=False)
+                _validate_size_before_download(probe_info)
+                info = ydl.extract_info(url, download=True)
+                filepath = _resolve_output_path(info, ydl)
+                if _needs_telegram_normalization(info):
+                    filepath = _normalize_for_telegram(filepath)
+                width, height = _extract_dimensions(info)
+                return DownloadedVideo(path=filepath, width=width, height=height)
+            except VideoTooLargeError:
+                raise
+            except DownloadError as exc:
+                last_exc = exc
+                if index < len(selectors) - 1:
+                    continue
+                raise RuntimeError(f"Download error: {exc}") from exc
 
-    await loop.run_in_executor(None, extract_and_download)
-    return output_file.get("path")
-
-
-async def test_tiktok():
-    url = "https://www.@username/video/1234567890123456789"  # Пример ссылки на TikTok видео
-    best_format = await get_best_tiktok_video_format(url)
-    print("Лучший формат:", best_format)
-    downloaded_path = await download_tiktok_video(url, best_format)
-    print("Видео сохранено в:", downloaded_path)
-
-
-async def test():
-    url = "https://youtube.com/shorts/ntrQfA47n1s?si=1l6P6KNrjHkQynMw"  # Видео от моих лучших друзей
-    format_info = await get_best_video_format(url)
-    print(await get_tiktok_video_dimensions(url))
-    print(await download_video(url, format_info))
+    if last_exc:
+        raise RuntimeError(f"Download error: {last_exc}") from last_exc
+    raise RuntimeError("Download error: unknown yt-dlp failure.")
 
 
-if __name__ == "__main__":
-    asyncio.run(test_tiktok())
-    asyncio.run(test())
+async def download_best_video(url: str) -> DownloadedVideo:
+    if not is_supported_video_url(url):
+        raise RuntimeError("Unsupported URL.")
+    return await asyncio.to_thread(_download_video_sync, url.strip())

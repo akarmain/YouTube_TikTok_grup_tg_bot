@@ -11,6 +11,7 @@
 - **Python 3.11+**
     + aiogram (3.15)
     + yt-dlp
+    + uv
 - **Docker + Docker Compose**
 
 ---
@@ -38,10 +39,36 @@ cd YouTube_grup_bot
 cp example.env .env
 ```
 
-#### 3.1. Для большей стабильности сохраните ютуб куки в youTube/cookies.txt
+Укажите в `.env`:
+
+- `TG_MAIN_BOT_TOKEN` - токен бота
+- `TG_ADMIN_ID` - Telegram ID администратора (например, `912185600`)
+- `TG_MAX_VIDEO_SIZE_MB` - лимит размера видео для проверки до скачивания (по умолчанию `49`)
+
+#### 3.1. Для большей стабильности настройте YouTube cookies локально
+
+```bash
+cp bot/youTube/cookies.example.txt bot/youTube/cookies.txt
+```
+
+Заполните `bot/youTube/cookies.txt` своими cookies локально и не добавляйте этот файл в git.
 [Подробнее](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
 
-#### 3. Запустите проект через Docker Compose
+#### 3. Установите зависимости через uv (локальный запуск)
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip sync requirements.txt
+```
+
+#### 4. Запуск локально
+
+```bash
+uv run python run.py
+```
+
+#### 5. Запустите проект через Docker Compose
 
 Соберите и запустите контейнеры:
 
@@ -50,6 +77,28 @@ docker-compose up --build
 ```
 
 ---
+### Поведение загрузки
+
+- Поддерживаются ссылки YouTube (`youtube.com`, `youtu.be`) и TikTok (`tiktok.com`, `vm/vt.tiktok.com`).
+- Бот выбирает лучшее доступное качество с приоритетом не ниже `420p` (если такой формат есть).
+- Видео отправляется в Telegram как `video` (streaming), без добавления подписи от бота.
+- Для стабильного воспроизведения в Telegram Desktop (включая macOS) видео нормализуется в `H.264 + AAC`, `yuv420p`, `30fps`, `+faststart`.
+- По команде `/send_db` администратор получает в личные сообщения JSON с пользователями, которые запускали `/start`.
+- Повторные ссылки отправляются мгновенно через сохраненный `file_id` (без повторного скачивания), ключи нормализуются по ID видео.
+- Перед скачиванием бот проверяет размер выбранного формата и не загружает видео, если оно больше лимита `TG_MAX_VIDEO_SIZE_MB`.
+
+---
+### Безопасность GitHub
+
+- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`.
+- Перед `git push` проверьте изменения:
+
+```bash
+git status --short
+git diff --name-only
+```
+- Если токен/куки уже утекли в историю git, отзовите (rotate) секреты и очистите историю репозитория перед публикацией.
+
+---
 
 _Спасибо, что читаете мой код!_
-

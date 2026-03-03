@@ -27,6 +27,7 @@ PREFERRED_FORMAT_SELECTOR = (
     "b"
 )
 FALLBACK_FORMAT_SELECTOR = "bv*+ba/b"
+LAST_RESORT_FORMAT_SELECTOR = "bestvideo+bestaudio/best"
 
 
 @dataclass(slots=True)
@@ -254,7 +255,11 @@ def _download_video_sync(url: str) -> DownloadedVideo:
             base_options["cookiefile"] = YOUTUBE_COOKIES
 
     last_exc: DownloadError | None = None
-    selectors = (PREFERRED_FORMAT_SELECTOR, FALLBACK_FORMAT_SELECTOR)
+    selectors = (
+        PREFERRED_FORMAT_SELECTOR,
+        FALLBACK_FORMAT_SELECTOR,
+        LAST_RESORT_FORMAT_SELECTOR,
+    )
     for index, format_selector in enumerate(selectors):
         options = {**base_options, "format": format_selector}
         with YoutubeDL(options) as ydl:

@@ -23,7 +23,7 @@ async def in_start(bot: Bot):
     cache_dir = f"{BASIC_DIR}/cache/"
     if os.path.exists(cache_dir):
         shutil.rmtree(cache_dir)
-        os.makedirs(cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
     logger.info(f"Aiogram START bot: @{BOT_NAME}")
 
 

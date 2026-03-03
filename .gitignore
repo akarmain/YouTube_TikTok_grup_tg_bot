@@ -243,6 +243,7 @@ cython_debug/
 
 # Runtime files with personal/sensitive data
 bot/youTube/cookies.txt
+bot/tiktok/cookies.txt
 bot/database/*.log
 bot/database/users_videos.json
 bot/database/users_export.json

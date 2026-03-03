@@ -1,0 +1,8 @@
+# Netscape HTTP Cookie File
+# Example file for local setup only.
+# Do NOT commit personal cookies to git.
+#
+# Local usage:
+# 1. Export TikTok cookies in Netscape format
+# 2. Save them to bot/tiktok/cookies.txt
+# 3. Keep bot/tiktok/cookies.txt out of commits

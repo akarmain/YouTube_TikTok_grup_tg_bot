@@ -28,3 +28,4 @@ MAX_VIDEO_SIZE_MB = Env.TG_MAX_VIDEO_SIZE_MB
 MAX_VIDEO_SIZE_BYTES = MAX_VIDEO_SIZE_MB * 1024 * 1024
 JSON_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.json")
 YOUTUBE_COOKIES = os.path.join(BASIC_DIR, "youTube/cookies.txt")
+TIKTOK_COOKIES = os.path.join(BASIC_DIR, "tiktok", "cookies.txt")

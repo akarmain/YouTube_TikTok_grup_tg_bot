@@ -54,6 +54,14 @@ cp bot/youTube/cookies.example.txt bot/youTube/cookies.txt
 Заполните `bot/youTube/cookies.txt` своими cookies локально и не добавляйте этот файл в git.
 [Подробнее](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
 
+#### 3.2. (Опционально) TikTok cookies
+
+```bash
+cp bot/tiktok/cookies.example.txt bot/tiktok/cookies.txt
+```
+
+Если у TikTok есть ограничения по региону/возрасту/частоте, локальные cookies могут повысить стабильность.
+
 #### 3. Установите зависимости через uv (локальный запуск)
 
 ```bash
@@ -90,7 +98,7 @@ docker-compose up --build
 ---
 ### Безопасность GitHub
 
-- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`.
+- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/tiktok/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`.
 - Перед `git push` проверьте изменения:
 
 ```bash

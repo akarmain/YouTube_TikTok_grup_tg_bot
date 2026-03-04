@@ -1,6 +1,6 @@
 # YouTube_TikTok_grup_tg_bot
 
-### Telegram бот для скачивания YouTube shorts и TikTok
+### Telegram бот для скачивания YouTube Shorts и TikTok в чаты и каналы
 
 <img alt="demo.gif" src="demo.gif" width="512"/>
 
@@ -27,8 +27,8 @@
 Выполните команды:
 
 ```bash
-git clone https://github.com/akarmain/YouTube_grup_bot
-cd YouTube_grup_bot
+git clone https://github.com/akarmain/YouTube_TikTok_grup_tg_bot.git
+cd YouTube_TikTok_grup_tg_bot
 ```
 
 #### 2. Создайте файл `.env`
@@ -62,7 +62,13 @@ cp bot/tiktok/cookies.example.txt bot/tiktok/cookies.txt
 
 Если у TikTok есть ограничения по региону/возрасту/частоте, локальные cookies могут повысить стабильность.
 
-#### 3. Установите зависимости через uv (локальный запуск)
+#### 3.3. Как включить работу в канале (включая закрытый ТГК)
+
+1. Добавьте бота администратором в канал.
+2. Выдайте право на публикацию сообщений (`Post messages`).
+3. Публикуйте в канале пост с ссылкой YouTube/TikTok: бот отправит видеофайл в тот же канал.
+
+#### 4. Установите зависимости через uv (локальный запуск)
 
 ```bash
 uv venv
@@ -70,13 +76,13 @@ source .venv/bin/activate
 uv pip sync requirements.txt
 ```
 
-#### 4. Запуск локально
+#### 5. Запуск локально
 
 ```bash
 uv run python run.py
 ```
 
-#### 5. Запустите проект через Docker Compose
+#### 6. Запустите проект через Docker Compose
 
 Соберите и запустите контейнеры:
 
@@ -88,8 +94,10 @@ docker-compose up --build
 ### Поведение загрузки
 
 - Поддерживаются ссылки YouTube (`youtube.com`, `youtu.be`) и TikTok (`tiktok.com`, `vm/vt.tiktok.com`).
+- Бот обрабатывает ссылки в личных/групповых чатах и в `channel_post` (постах каналов).
+- Ссылка может быть единственным текстом сообщения или частью текста/подписи.
 - Бот выбирает лучшее доступное качество с приоритетом не ниже `420p` (если такой формат есть).
-- Видео отправляется в Telegram как `video` (streaming), без добавления подписи от бота.
+- Видео отправляется в Telegram как `video` (streaming), без подписи от бота.
 - Для стабильного воспроизведения в Telegram Desktop (включая macOS) видео нормализуется в `H.264 + AAC`, `yuv420p`, `30fps`, `+faststart`.
 - По команде `/send_db` администратор получает в личные сообщения JSON с пользователями, которые запускали `/start`.
 - Повторные ссылки отправляются мгновенно через сохраненный `file_id` (без повторного скачивания), ключи нормализуются по ID видео.

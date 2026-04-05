@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from bot.ffmpeg import ffmpeg_command, run_ffmpeg
 from bot.settings import CACHE_DIR, TIKTOK_COOKIES
 
 DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
@@ -119,8 +120,7 @@ def _build_format_candidates() -> list[tuple[str, bool]]:
 
 
 def _downscale_to_720p(src_path: str, dest_path: str) -> None:
-    cmd = [
-        "ffmpeg",
+    cmd = ffmpeg_command(
         "-y",
         "-i",
         src_path,
@@ -139,8 +139,8 @@ def _downscale_to_720p(src_path: str, dest_path: str) -> None:
         "-movflags",
         "+faststart",
         dest_path,
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    )
+    run_ffmpeg(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 async def download_tiktok_media(tt_url: str) -> TikTokMedia:

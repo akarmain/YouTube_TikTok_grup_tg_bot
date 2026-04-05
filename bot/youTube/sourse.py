@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from bot.ffmpeg import ffmpeg_command, run_ffmpeg
 from bot.settings import CACHE_DIR, MAX_VIDEO_SIZE_BYTES, MAX_VIDEO_SIZE_MB, YOUTUBE_COOKIES
 
 MIN_HEIGHT = 420
@@ -173,8 +174,7 @@ def _normalize_for_telegram(path: str) -> str:
     src_path = Path(path)
     normalized_path = src_path.with_name(f"{src_path.stem}.tgfix.mp4")
 
-    strict_command = [
-        "ffmpeg",
+    strict_command = ffmpeg_command(
         "-y",
         "-i",
         str(src_path),
@@ -213,9 +213,8 @@ def _normalize_for_telegram(path: str) -> str:
         "-movflags",
         "+faststart",
         str(normalized_path),
-    ]
-    relaxed_command = [
-        "ffmpeg",
+    )
+    relaxed_command = ffmpeg_command(
         "-y",
         "-i",
         str(src_path),
@@ -240,12 +239,12 @@ def _normalize_for_telegram(path: str) -> str:
         "-movflags",
         "+faststart",
         str(normalized_path),
-    ]
+    )
 
     last_output: list[str] = []
     for command in (strict_command, relaxed_command):
         try:
-            process = subprocess.run(command, capture_output=True, text=True, check=False)
+            process = run_ffmpeg(command, capture_output=True, text=True, check=False)
         except FileNotFoundError as exc:
             raise RuntimeError("ffmpeg not found. Install ffmpeg and retry.") from exc
 

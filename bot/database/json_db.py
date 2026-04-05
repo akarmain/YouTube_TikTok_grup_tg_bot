@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from bot.settings import JSON_DB_PATH
 
@@ -23,6 +23,26 @@ class JsonDB:
     @staticmethod
     def _empty() -> dict[str, Any]:
         return {"users": {}, "videos": {}}
+
+    @staticmethod
+    def _normalized_host(host: str) -> str:
+        normalized = (host or "").lower()
+        if normalized.startswith("www."):
+            normalized = normalized[4:]
+        return normalized
+
+    @classmethod
+    def _normalize_source_url(cls, source_url: str) -> str:
+        parsed = urlparse(source_url.strip())
+        scheme = (parsed.scheme or "https").lower()
+        host = cls._normalized_host(parsed.netloc)
+        path = re.sub(r"/{2,}", "/", parsed.path or "/")
+        if path != "/":
+            path = path.rstrip("/")
+
+        query_items = sorted(parse_qsl(parsed.query, keep_blank_values=False))
+        query = urlencode(query_items, doseq=True)
+        return urlunparse((scheme, host, path, "", query, ""))
 
     def _load_unlocked(self) -> dict[str, Any]:
         if not self._db_path.exists():
@@ -49,7 +69,7 @@ class JsonDB:
     @staticmethod
     def _extract_youtube_id(url: str) -> str | None:
         parsed = urlparse(url)
-        host = parsed.netloc.lower()
+        host = JsonDB._normalized_host(parsed.netloc)
         path = parsed.path.strip("/")
 
         if "youtu.be" in host and path:
@@ -59,7 +79,7 @@ class JsonDB:
         if query_id and query_id[0]:
             return query_id[0]
 
-        match = re.search(r"(?:shorts|embed|v)/([A-Za-z0-9_-]{11})", path)
+        match = re.search(r"(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})", path)
         if match:
             return match.group(1)
         return None
@@ -68,32 +88,35 @@ class JsonDB:
     def _extract_tiktok_id(url: str) -> str | None:
         parsed = urlparse(url)
         path = parsed.path
-        match = re.search(r"/video/(\d+)", path)
-        if match:
-            return match.group(1)
+        for pattern in (
+            r"/video/(\d+)",
+            r"/v/(\d+)(?:\.html)?",
+            r"/embed(?:/v2)?/(\d+)",
+        ):
+            match = re.search(pattern, path)
+            if match:
+                return match.group(1)
         return None
 
     @classmethod
-    def _canonical_video_ref(cls, source_url: str) -> tuple[str, str]:
+    def _canonical_video_ref(cls, source_url: str) -> tuple[str | None, str]:
         url = source_url.strip()
         parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        path = parsed.path.strip("/")
+        host = cls._normalized_host(parsed.netloc)
 
-        if "youtube.com" in host or "youtu.be" in host:
+        if host.endswith("youtube.com") or host == "youtu.be":
             yt_id = cls._extract_youtube_id(url)
             if yt_id:
                 return f"youtube:{yt_id}", "youtube"
-            return f"youtube_url:{host}/{path}", "youtube"
+            return None, "youtube"
 
-        if "tiktok.com" in host:
+        if host.endswith("tiktok.com"):
             tt_id = cls._extract_tiktok_id(url)
             if tt_id:
                 return f"tiktok:{tt_id}", "tiktok"
-            short_code = path.split("/")[0] if path else ""
-            return f"tiktok_url:{host}/{short_code}", "tiktok"
+            return None, "tiktok"
 
-        return f"url:{host}/{path}", "unknown"
+        return None, "unknown"
 
     @staticmethod
     def _video_key(seed: str) -> str:
@@ -131,14 +154,16 @@ class JsonDB:
         async with self._lock:
             data = self._load_unlocked()
             videos = data["videos"]
+            normalized_url = self._normalize_source_url(source_url)
             canonical_ref, detected_platform = self._canonical_video_ref(source_url)
-            key = self._video_key(canonical_ref)
+            key = self._video_key(normalized_url)
             now = self._now_iso()
 
             video_record = videos.get(
                 key,
                 {
                     "source_url": source_url,
+                    "normalized_url": normalized_url,
                     "canonical_ref": canonical_ref,
                     "platform": platform or detected_platform,
                     "first_sent_at": now,
@@ -147,6 +172,7 @@ class JsonDB:
                 },
             )
             video_record["source_url"] = source_url
+            video_record["normalized_url"] = normalized_url
             video_record["canonical_ref"] = canonical_ref
             video_record["platform"] = platform or detected_platform
             video_record["file_id"] = file_id
@@ -165,10 +191,10 @@ class JsonDB:
         async with self._lock:
             data = self._load_unlocked()
             videos = data.get("videos", {})
+            normalized_url = self._normalize_source_url(source_url)
 
-            canonical_ref, _ = self._canonical_video_ref(source_url)
-            key = self._video_key(canonical_ref)
-            record = videos.get(key)
+            exact_key = self._video_key(normalized_url)
+            record = videos.get(exact_key)
             if record and record.get("file_id"):
                 return str(record["file_id"])
 
@@ -176,18 +202,61 @@ class JsonDB:
             legacy_record = videos.get(legacy_key)
             if legacy_record and legacy_record.get("file_id"):
                 return str(legacy_record["file_id"])
+
+            for record in videos.values():
+                if not isinstance(record, dict):
+                    continue
+                if record.get("normalized_url") == normalized_url and record.get("file_id"):
+                    return str(record["file_id"])
+
+            canonical_ref, _ = self._canonical_video_ref(source_url)
+            if not canonical_ref:
+                return None
+
+            key = self._video_key(canonical_ref)
+            record = videos.get(key)
+            if record and record.get("file_id") and record.get("canonical_ref") == canonical_ref:
+                return str(record["file_id"])
+
+            matched_records = [
+                record
+                for record in videos.values()
+                if isinstance(record, dict)
+                and record.get("canonical_ref") == canonical_ref
+                and record.get("file_id")
+            ]
+            if matched_records:
+                matched_records.sort(key=lambda row: str(row.get("last_sent_at", "")), reverse=True)
+                return str(matched_records[0]["file_id"])
             return None
 
     async def invalidate_cached_file_id(self, source_url: str) -> None:
         async with self._lock:
             data = self._load_unlocked()
             videos = data.get("videos", {})
+            normalized_url = self._normalize_source_url(source_url)
             canonical_ref, _ = self._canonical_video_ref(source_url)
 
-            for key in (self._video_key(canonical_ref), self._video_key(source_url.strip())):
+            keys_to_invalidate = {
+                self._video_key(normalized_url),
+                self._video_key(source_url.strip()),
+            }
+            if canonical_ref:
+                keys_to_invalidate.add(self._video_key(canonical_ref))
+
+            for key in keys_to_invalidate:
                 if key in videos and videos[key].get("file_id"):
                     videos[key]["file_id"] = None
                     videos[key]["invalidated_at"] = self._now_iso()
+
+            for record in videos.values():
+                if not isinstance(record, dict) or not record.get("file_id"):
+                    continue
+                if record.get("normalized_url") == normalized_url or (
+                    canonical_ref and record.get("canonical_ref") == canonical_ref
+                ):
+                    record["file_id"] = None
+                    record["invalidated_at"] = self._now_iso()
 
             self._save_unlocked(data)
 

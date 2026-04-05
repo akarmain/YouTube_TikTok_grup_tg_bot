@@ -7,12 +7,24 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile, Message
 
 from bot.database.json_db import json_db
-from bot.settings import ADMIN_ID
+from bot.settings import ADMIN_COMMANDS, ADMIN_ID
 
 
 def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_start, CommandStart())
+    dp.message.register(cmd_admin_commands, Command("cmd"))
     dp.message.register(cmd_send_db, Command("send_db"))
+
+
+def _is_admin(msg: Message) -> bool:
+    return bool(msg.from_user and msg.from_user.id == ADMIN_ID)
+
+
+def _admin_commands_text() -> str:
+    lines = ["Доступные команды администратора:"]
+    for command, description in ADMIN_COMMANDS.items():
+        lines.append(f"/{command} - {description}")
+    return "\n".join(lines)
 
 
 async def cmd_start(msg: Message, state: FSMContext) -> None:
@@ -28,8 +40,16 @@ async def cmd_start(msg: Message, state: FSMContext) -> None:
         "👋 Привет!\n\nЯ бот для скачивания коротких видео с YouTube и TikTok. Просто добавь меня в группу с друзьями, и я буду автоматически сохранять видео по ссылкам, которые вы отправляете. 🎥")
 
 
+async def cmd_admin_commands(msg: Message) -> None:
+    if not _is_admin(msg):
+        await msg.answer("Команда доступна только администратору.")
+        return
+
+    await msg.answer(_admin_commands_text())
+
+
 async def cmd_send_db(msg: Message) -> None:
-    if not msg.from_user or msg.from_user.id != ADMIN_ID:
+    if not _is_admin(msg):
         await msg.answer("Команда доступна только администратору.")
         return
 

@@ -25,5 +25,10 @@ dependencies = [
     "python-dotenv==1.0.1",
     "typing_extensions==4.12.2",
     "yarl==1.18.3",
-    "yt-dlp[default,ejs] ",
-  ]
+    "yt-dlp[curl-cffi,default]>=2025.11.12",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

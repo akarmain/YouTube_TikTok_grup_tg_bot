@@ -1,8 +1,5 @@
 import asyncio
 import os
-import re
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -10,15 +7,16 @@ from urllib.parse import urlparse
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from bot.ffmpeg import ffmpeg_command, run_ffmpeg
+from bot.downloader.media import MediaResult, VideoTooLargeError
+from bot.downloader.video_tools import (
+    extract_dimensions,
+    needs_telegram_normalization,
+    normalize_for_telegram,
+    resolve_output_path,
+)
 from bot.settings import CACHE_DIR, MAX_VIDEO_SIZE_BYTES, MAX_VIDEO_SIZE_MB, YOUTUBE_COOKIES
 
 MIN_HEIGHT = 420
-SUPPORTED_URL_PATTERN = (
-    r"(?i)^https?://(?:[\w-]+\.)?"
-    r"(?:youtube\.com|youtu\.be|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/\S+$"
-)
-SUPPORTED_URL_RE = re.compile(SUPPORTED_URL_PATTERN)
 
 # Prefer >=420p when available, then fallback to best available stream.
 PREFERRED_FORMAT_SELECTOR = (
@@ -30,71 +28,14 @@ PREFERRED_FORMAT_SELECTOR = (
 FALLBACK_FORMAT_SELECTOR = "bv*+ba/b"
 LAST_RESORT_FORMAT_SELECTOR = "bestvideo+bestaudio/best"
 
-
-@dataclass(slots=True)
-class DownloadedVideo:
-    path: str
-    width: int | None
-    height: int | None
-
-
-class VideoTooLargeError(RuntimeError):
-    pass
-
-
-def is_supported_video_url(url: str) -> bool:
-    return bool(SUPPORTED_URL_RE.match((url or "").strip()))
+# ponytail: download budget of 4x the send limit — bigger files are rejected before
+# download, smaller ones get the 720p/480p/360p compression fallback after download.
+DOWNLOAD_BUDGET_BYTES = MAX_VIDEO_SIZE_BYTES * 4
 
 
 def _is_youtube_url(url: str) -> bool:
     host = urlparse(url).netloc.lower()
     return "youtube.com" in host or "youtu.be" in host
-
-
-def _extract_dimensions(info: dict[str, Any]) -> tuple[int | None, int | None]:
-    width = info.get("width")
-    height = info.get("height")
-    if width and height:
-        return width, height
-
-    for fmt in info.get("requested_formats") or []:
-        fmt_width = fmt.get("width")
-        fmt_height = fmt.get("height")
-        if fmt_width and fmt_height:
-            return fmt_width, fmt_height
-
-    for fmt in info.get("formats") or []:
-        fmt_width = fmt.get("width")
-        fmt_height = fmt.get("height")
-        if fmt_width and fmt_height:
-            return fmt_width, fmt_height
-
-    return None, None
-
-
-def _resolve_output_path(info: dict[str, Any], ydl: YoutubeDL) -> str:
-    candidates: list[Path] = []
-    requested_downloads = info.get("requested_downloads") or []
-    for item in requested_downloads:
-        filepath = item.get("filepath")
-        if filepath:
-            candidates.append(Path(filepath))
-
-    filename = info.get("_filename")
-    if filename:
-        candidates.append(Path(filename))
-
-    prepared_filename = ydl.prepare_filename(info)
-    if prepared_filename:
-        prepared_path = Path(prepared_filename)
-        candidates.append(prepared_path)
-        candidates.append(prepared_path.with_suffix(".mp4"))
-
-    for path in candidates:
-        if path.exists():
-            return str(path)
-
-    raise RuntimeError("Downloaded file was not found on disk.")
 
 
 def _extract_selected_size_bytes(info: dict[str, Any]) -> int | None:
@@ -125,143 +66,21 @@ def _extract_selected_size_bytes(info: dict[str, Any]) -> int | None:
     return None
 
 
-def _validate_size_before_download(info: dict[str, Any]) -> None:
+def _validate_before_download(info: dict[str, Any]) -> None:
+    if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+        raise RuntimeError("Live streams are not supported.")
+
     size_bytes = _extract_selected_size_bytes(info)
     if size_bytes is None:
         return
-    if size_bytes > MAX_VIDEO_SIZE_BYTES:
+    if size_bytes > DOWNLOAD_BUDGET_BYTES:
         size_mb = size_bytes / (1024 * 1024)
         raise VideoTooLargeError(
             f"Video is too large: {size_mb:.1f} MB. Limit is {MAX_VIDEO_SIZE_MB} MB."
         )
 
 
-def _extract_selected_codecs(info: dict[str, Any]) -> tuple[str | None, str | None, float | None]:
-    requested_formats = info.get("requested_formats") or []
-    video_codec: str | None = None
-    audio_codec: str | None = None
-    fps: float | None = None
-
-    for fmt in requested_formats:
-        if not video_codec and fmt.get("vcodec") and fmt.get("vcodec") != "none":
-            video_codec = str(fmt.get("vcodec"))
-            fps = fmt.get("fps")
-        if not audio_codec and fmt.get("acodec") and fmt.get("acodec") != "none":
-            audio_codec = str(fmt.get("acodec"))
-
-    if not video_codec and info.get("vcodec") and info.get("vcodec") != "none":
-        video_codec = str(info.get("vcodec"))
-        fps = info.get("fps")
-    if not audio_codec and info.get("acodec") and info.get("acodec") != "none":
-        audio_codec = str(info.get("acodec"))
-
-    return video_codec, audio_codec, fps
-
-
-def _needs_telegram_normalization(info: dict[str, Any]) -> bool:
-    video_codec, audio_codec, fps = _extract_selected_codecs(info)
-    ext = str(info.get("ext", "")).lower()
-
-    video_ok = bool(video_codec and (video_codec.startswith("avc1") or video_codec.startswith("h264")))
-    audio_ok = audio_codec is None or audio_codec.startswith("mp4a") or audio_codec.startswith("aac")
-    fps_ok = fps is None or float(fps) <= 30.0
-    container_ok = ext == "mp4"
-
-    return not (video_ok and audio_ok and fps_ok and container_ok)
-
-
-def _normalize_for_telegram(path: str) -> str:
-    src_path = Path(path)
-    normalized_path = src_path.with_name(f"{src_path.stem}.tgfix.mp4")
-
-    strict_command = ffmpeg_command(
-        "-y",
-        "-i",
-        str(src_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "high",
-        "-level:v",
-        "4.1",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "20",
-        "-r",
-        "30",
-        "-g",
-        "60",
-        "-keyint_min",
-        "60",
-        "-sc_threshold",
-        "0",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        str(normalized_path),
-    )
-    relaxed_command = ffmpeg_command(
-        "-y",
-        "-i",
-        str(src_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "22",
-        "-r",
-        "30",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        str(normalized_path),
-    )
-
-    last_output: list[str] = []
-    for command in (strict_command, relaxed_command):
-        try:
-            process = run_ffmpeg(command, capture_output=True, text=True, check=False)
-        except FileNotFoundError as exc:
-            raise RuntimeError("ffmpeg not found. Install ffmpeg and retry.") from exc
-
-        if process.returncode == 0 and normalized_path.exists():
-            src_path.unlink(missing_ok=True)
-            normalized_path.replace(src_path.with_suffix(".mp4"))
-            return str(src_path.with_suffix(".mp4"))
-
-        output = (process.stderr or process.stdout or "").strip().splitlines()
-        if output:
-            last_output = output
-
-    tail = " | ".join(last_output[-3:]) if last_output else "unknown ffmpeg error"
-    raise RuntimeError(f"ffmpeg normalization failed: {tail}")
-
-
-def _download_video_sync(url: str) -> DownloadedVideo:
+def _download_video_sync(url: str) -> MediaResult:
     Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
     base_options: dict[str, Any] = {
@@ -296,17 +115,27 @@ def _download_video_sync(url: str) -> DownloadedVideo:
         with YoutubeDL(options) as ydl:
             try:
                 probe_info = ydl.extract_info(url, download=False)
-                _validate_size_before_download(probe_info)
+                _validate_before_download(probe_info)
                 info = ydl.extract_info(url, download=True)
-                filepath = _resolve_output_path(info, ydl)
-                if _needs_telegram_normalization(info):
+                filepath = resolve_output_path(info, ydl)
+                if needs_telegram_normalization(info):
                     try:
-                        filepath = _normalize_for_telegram(filepath)
+                        filepath = normalize_for_telegram(filepath)
                     except RuntimeError:
                         # Keep original downloaded file if ffmpeg normalization fails.
                         pass
-                width, height = _extract_dimensions(info)
-                return DownloadedVideo(path=filepath, width=width, height=height)
+                width, height = extract_dimensions(info)
+                return MediaResult(
+                    platform="youtube",
+                    source_url=url,
+                    media_type="video",
+                    path=filepath,
+                    width=width,
+                    height=height,
+                    title=info.get("title"),
+                    description=info.get("description"),
+                    duration=info.get("duration"),
+                )
             except VideoTooLargeError:
                 raise
             except DownloadError as exc:
@@ -320,7 +149,5 @@ def _download_video_sync(url: str) -> DownloadedVideo:
     raise RuntimeError("Download error: unknown yt-dlp failure.")
 
 
-async def download_best_video(url: str) -> DownloadedVideo:
-    if not is_supported_video_url(url):
-        raise RuntimeError("Unsupported URL.")
+async def download_youtube(url: str) -> MediaResult:
     return await asyncio.to_thread(_download_video_sync, url.strip())

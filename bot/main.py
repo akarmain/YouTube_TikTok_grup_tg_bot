@@ -9,10 +9,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types.bot_command import BotCommand
 from loguru import logger
 
+from bot.downloader.router import register_handlers as register_downloader
 from bot.init import register_init
 from bot.settings import ALL_COMMANDS, BOT_NAME, CACHE_DIR, Env
-from bot.tiktok import register_tiktok
-from bot.youTube import register_youtube
 
 
 async def in_start(bot: Bot):
@@ -37,8 +36,7 @@ async def start_bot():
     dp = Dispatcher(storage=MemoryStorage())
 
     register_init(dp)
-    register_youtube(dp)
-    register_tiktok(dp)
+    register_downloader(dp)
 
     dp.startup.register(in_start)
     dp.shutdown.register(in_stop)

@@ -16,6 +16,7 @@ from urllib.request import HTTPCookieProcessor, build_opener
 
 from loguru import logger
 from yt_dlp import YoutubeDL
+from yt_dlp.networking.impersonate import ImpersonateTarget
 from yt_dlp.utils import DownloadError
 
 try:
@@ -108,6 +109,7 @@ def _tiktok_extractor_args() -> dict:
 
 def _build_format_candidates() -> list[tuple[str, bool]]:
     return [
+        ("best/b", True),
         ("bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]", False),
         ("bv*[height<=720]+ba/b[height<=720]", False),
         ("b[height<=720]/best[height<=720]", False),
@@ -135,7 +137,9 @@ def _extractor_variants() -> list[dict]:
     return [
         {
             "http_headers": {
-                "User-Agent": MOBILE_APP_UA,
+                "User-Agent": DESKTOP_UA,
+                "Referer": "https://www.tiktok.com/",
+                "Origin": "https://www.tiktok.com",
                 "Accept-Language": "en-US,en;q=0.9",
             },
         },
@@ -149,9 +153,7 @@ def _extractor_variants() -> list[dict]:
         },
         {
             "http_headers": {
-                "User-Agent": DESKTOP_UA,
-                "Referer": "https://www.tiktok.com/",
-                "Origin": "https://www.tiktok.com",
+                "User-Agent": MOBILE_APP_UA,
                 "Accept-Language": "en-US,en;q=0.9",
             },
         },
@@ -169,6 +171,7 @@ def _base_ydl_opts() -> dict:
         "retries": 3,
         "fragment_retries": 3,
         "extractor_retries": 3,
+        "impersonate": ImpersonateTarget.from_str("chrome"),
         "extractor_args": _tiktok_extractor_args(),
     }
 
@@ -180,7 +183,6 @@ def _is_tiktok_unavailable_error(error: Exception) -> bool:
         for marker in (
             "video not available",
             "status code 0",
-            "requested format is not available",
             "login required",
             "captcha",
         )

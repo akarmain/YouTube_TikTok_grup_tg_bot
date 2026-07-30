@@ -25,6 +25,7 @@
 - Добавлена поддержка `curl-cffi` для более стабильной работы `yt-dlp` и TikTok/Instagram-запросов при антибот-проверках.
 - Добавлен кэш `file_id` для успешно отправленных mp4-результатов, включая слайдшоу-видео.
 - Live/stream-контент намеренно не скачивается.
+- Хранилище пользователей и кэша `file_id` переведено с JSON-файла на SQLite (`bot/database/users_videos.sqlite3`, режим `WAL`). Если у вас уже есть старый `bot/database/users_videos.json`, перенесите его один раз командой `python -m bot.database.migrate_json_to_sqlite`.
 
 ---
 ### Используемый стек технологий
@@ -146,7 +147,7 @@ docker-compose up --build
 ---
 ### Безопасность GitHub
 
-- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/tiktok/cookies.txt`, `bot/instagram/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`.
+- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/tiktok/cookies.txt`, `bot/instagram/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`, `bot/database/users_videos.sqlite3` (и `-wal`/`-shm` файлы рядом с ней).
 - Перед `git push` проверьте изменения:
 
 ```bash

@@ -90,14 +90,14 @@ class FakeJsonDB:
         self.cache: dict[str, str] = {}
         self.upserts: list[tuple] = []
 
-    async def get_cached_file_id(self, source_url: str) -> str | None:
+    async def get_cached_file_id(self, source_url: str, media_kind: str = "video") -> str | None:
         return self.cache.get(source_url)
 
-    async def upsert_video(self, source_url, file_id, sender_user_id, platform=None) -> None:
+    async def upsert_video(self, source_url, file_id, sender_user_id, platform=None, media_kind="video") -> None:
         self.cache[source_url] = file_id
         self.upserts.append((source_url, file_id, sender_user_id, platform))
 
-    async def invalidate_cached_file_id(self, source_url: str) -> None:
+    async def invalidate_cached_file_id(self, source_url: str, media_kind: str = "video") -> None:
         self.cache.pop(source_url, None)
 
 
@@ -186,7 +186,14 @@ async def test_worker_pool_never_exceeds_configured_concurrency(monkeypatch):
     for i in range(6):
         msg = FakeMessage(bot)
         await router._QUEUE.put(
-            router._QueueJob(msg=msg, source_url=f"https://tiktok.com/@u/video/{i}", platform="tiktok", status_msg=None)
+            router._QueueJob(
+                msg=msg,
+                source_url=f"https://tiktok.com/@u/video/{i}",
+                platform="tiktok",
+                media_kind="video",
+                sender_user_id=msg.from_user.id,
+                status_msg=None,
+            )
         )
     await router._QUEUE.join()
 
@@ -261,7 +268,14 @@ async def test_process_job_cache_hit_sends_by_file_id_and_marks_done(fake_json_d
     bot = FakeBot()
     msg = FakeMessage(bot)
     status = FakeStatusMessage()
-    job = router._QueueJob(msg=msg, source_url="https://tiktok.com/@u/video/1", platform="tiktok", status_msg=status)
+    job = router._QueueJob(
+        msg=msg,
+        source_url="https://tiktok.com/@u/video/1",
+        platform="tiktok",
+        media_kind="video",
+        sender_user_id=msg.from_user.id,
+        status_msg=status,
+    )
 
     await router._process_job(job)
 
@@ -278,7 +292,14 @@ async def test_process_job_reports_video_too_large_error(monkeypatch):
     bot = FakeBot()
     msg = FakeMessage(bot)
     status = FakeStatusMessage()
-    job = router._QueueJob(msg=msg, source_url="https://tiktok.com/@u/video/2", platform="tiktok", status_msg=status)
+    job = router._QueueJob(
+        msg=msg,
+        source_url="https://tiktok.com/@u/video/2",
+        platform="tiktok",
+        media_kind="video",
+        sender_user_id=msg.from_user.id,
+        status_msg=status,
+    )
 
     await router._process_job(job)
 
@@ -295,7 +316,14 @@ async def test_process_job_reports_generic_error_without_a_stack_trace(monkeypat
     bot = FakeBot()
     msg = FakeMessage(bot)
     status = FakeStatusMessage()
-    job = router._QueueJob(msg=msg, source_url="https://tiktok.com/@u/video/3", platform="tiktok", status_msg=status)
+    job = router._QueueJob(
+        msg=msg,
+        source_url="https://tiktok.com/@u/video/3",
+        platform="tiktok",
+        media_kind="video",
+        sender_user_id=msg.from_user.id,
+        status_msg=status,
+    )
 
     await router._process_job(job)
 

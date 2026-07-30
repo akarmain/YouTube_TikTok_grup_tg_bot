@@ -151,3 +151,72 @@ def _download_video_sync(url: str) -> MediaResult:
 
 async def download_youtube(url: str) -> MediaResult:
     return await asyncio.to_thread(_download_video_sync, url.strip())
+
+
+AUDIO_CODEC = "mp3"
+AUDIO_BITRATE_KBPS = "192"
+
+
+def _find_sibling_file(base_path: str, suffixes: tuple[str, ...]) -> str | None:
+    for suffix in suffixes:
+        candidate = f"{base_path}{suffix}"
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _download_audio_sync(url: str) -> MediaResult:
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+    options: dict[str, Any] = {
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(CACHE_DIR, "%(extractor)s_%(id)s.audio.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "restrictfilenames": True,
+        "writethumbnail": True,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": AUDIO_CODEC,
+                "preferredquality": AUDIO_BITRATE_KBPS,
+            },
+            {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
+        ],
+        "retries": 3,
+        "fragment_retries": 3,
+        "skip_unavailable_fragments": True,
+    }
+    if os.path.isfile(YOUTUBE_COOKIES):
+        options["cookiefile"] = YOUTUBE_COOKIES
+
+    with YoutubeDL(options) as ydl:
+        try:
+            probe_info = ydl.extract_info(url, download=False)
+            _validate_before_download(probe_info)
+            info = ydl.extract_info(url, download=True)
+        except DownloadError as exc:
+            raise RuntimeError(f"Download error: {exc}") from exc
+
+        base_path = os.path.splitext(ydl.prepare_filename(info))[0]
+        audio_path = _find_sibling_file(base_path, (f".{AUDIO_CODEC}",))
+        if not audio_path:
+            raise RuntimeError("Downloaded audio file was not found on disk.")
+
+        thumbnail_path = _find_sibling_file(base_path, (".jpg", ".jpeg"))
+
+        return MediaResult(
+            platform="youtube",
+            source_url=url,
+            media_type="audio",
+            path=audio_path,
+            title=info.get("title"),
+            performer=info.get("uploader") or info.get("channel"),
+            duration=info.get("duration"),
+            thumbnail_path=thumbnail_path,
+        )
+
+
+async def download_youtube_audio(url: str) -> MediaResult:
+    return await asyncio.to_thread(_download_audio_sync, url.strip())

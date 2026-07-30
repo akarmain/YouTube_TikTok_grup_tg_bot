@@ -20,11 +20,11 @@ ON CONFLICT(user_id) DO UPDATE SET
 
 _UPSERT_VIDEO_SQL = """
 INSERT INTO videos (
-    key, source_url, normalized_url, canonical_ref, platform, file_id,
+    key, source_url, normalized_url, canonical_ref, platform, media_kind, file_id,
     first_sent_at, last_sent_at, send_count, sender_user_ids, invalidated_at
 )
 VALUES (
-    :key, :source_url, :normalized_url, :canonical_ref, :platform, :file_id,
+    :key, :source_url, :normalized_url, :canonical_ref, :platform, :media_kind, :file_id,
     :first_sent_at, :last_sent_at, :send_count, :sender_user_ids, :invalidated_at
 )
 ON CONFLICT(key) DO UPDATE SET
@@ -32,6 +32,7 @@ ON CONFLICT(key) DO UPDATE SET
     normalized_url = excluded.normalized_url,
     canonical_ref = excluded.canonical_ref,
     platform = excluded.platform,
+    media_kind = excluded.media_kind,
     file_id = excluded.file_id,
     first_sent_at = excluded.first_sent_at,
     last_sent_at = excluded.last_sent_at,
@@ -81,6 +82,7 @@ def migrate(json_path: Path, sqlite_path: Path) -> tuple[int, int]:
                     "normalized_url": video.get("normalized_url") or video["source_url"],
                     "canonical_ref": video.get("canonical_ref"),
                     "platform": video.get("platform"),
+                    "media_kind": video.get("media_kind", "video"),
                     "file_id": video.get("file_id"),
                     "first_sent_at": video.get("first_sent_at") or video.get("last_sent_at"),
                     "last_sent_at": video.get("last_sent_at") or video.get("first_sent_at"),

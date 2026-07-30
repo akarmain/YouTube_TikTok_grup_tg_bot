@@ -248,5 +248,8 @@ bot/instagram/cookies.txt
 bot/database/*.log
 bot/database/users_videos.json
 bot/database/users_export.json
+bot/database/users_videos.sqlite3
+bot/database/users_videos.sqlite3-wal
+bot/database/users_videos.sqlite3-shm
 bot/cache/
 .DS_Store

@@ -60,6 +60,7 @@ FFMPEG_MAX_JOBS, FFMPEG_THREADS = compute_ffmpeg_concurrency(
 )
 DOWNLOAD_WORKERS = max(1, Env.TG_DOWNLOAD_WORKERS) if Env.TG_DOWNLOAD_WORKERS is not None else FFMPEG_MAX_JOBS
 JSON_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.json")
+SQLITE_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.sqlite3")
 YOUTUBE_COOKIES = os.path.join(BASIC_DIR, "youTube/cookies.txt")
 TIKTOK_COOKIES = os.path.join(BASIC_DIR, "tiktok", "cookies.txt")
 INSTAGRAM_COOKIES = os.path.join(BASIC_DIR, "instagram", "cookies.txt")

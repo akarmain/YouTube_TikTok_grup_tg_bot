@@ -25,6 +25,7 @@
 - Добавлена поддержка `curl-cffi` для более стабильной работы `yt-dlp` и TikTok/Instagram-запросов при антибот-проверках.
 - Добавлен кэш `file_id` для успешно отправленных mp4-результатов, включая слайдшоу-видео.
 - Live/stream-контент намеренно не скачивается.
+- Хранилище пользователей и кэша `file_id` переведено с JSON-файла на SQLite (`bot/database/users_videos.sqlite3`, режим `WAL`). Если у вас уже есть старый `bot/database/users_videos.json`, перенесите его один раз командой `python -m bot.database.migrate_json_to_sqlite`.
 - Добавлена опциональная поддержка [Local Bot API Server](https://github.com/tdlib/telegram-bot-api) через один переключатель `TG_LOCAL_BOT_API_ENABLED`: снимает стандартный лимит Cloud Bot API на отправку файлов ботом (50 MB) и поднимает его до 2000 MB. По умолчанию выключено - бот работает через обычный `api.telegram.org` без каких-либо дополнительных контейнеров или настроек, максимально совместимо с любым окружением.
 
 
@@ -67,9 +68,6 @@ cp example.env .env
 - `TG_MAIN_BOT_TOKEN` - токен бота
 - `TG_ADMIN_ID` - Telegram ID администратора (например, `912185600`)
 - `TG_LOCAL_BOT_API_ENABLED` - включает Local Bot API Server и лимит 2000 MB, см. ниже (по умолчанию `false` - лимит видео фиксирован на `49` MB, работает без единой лишней настройки)
-- `TG_FFMPEG_THREADS` - число потоков `ffmpeg` для одной задачи перекодирования (по умолчанию `1`)
-- `TG_FFMPEG_MAX_JOBS` - максимальное число одновременных задач `ffmpeg` (по умолчанию `1`)
-- `TG_MAX_VIDEO_SIZE_MB` - лимит размера видео для проверки до скачивания (по умолчанию `49`)
 - `TG_FFMPEG_THREADS` - число потоков `ffmpeg` для одной задачи перекодирования (если не задано - считается от числа ядер CPU)
 - `TG_FFMPEG_MAX_JOBS` - максимальное число одновременных задач `ffmpeg` (если не задано - считается от числа ядер CPU: `ядра // 2`)
 - `TG_DOWNLOAD_WORKERS` - размер пула воркеров для пайплайна `скачивание → сжатие → отправка` (если не задано - равен `TG_FFMPEG_MAX_JOBS`)
@@ -179,7 +177,7 @@ docker-compose up --build
 ---
 ### Безопасность GitHub
 
-- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/tiktok/cookies.txt`, `bot/instagram/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`.
+- Никогда не коммитьте `.env`, `bot/youTube/cookies.txt`, `bot/tiktok/cookies.txt`, `bot/instagram/cookies.txt`, `bot/database/*.log`, `bot/database/users_videos.json`, `bot/database/users_videos.sqlite3` (и `-wal`/`-shm` файлы рядом с ней).
 - Перед `git push` проверьте изменения:
 
 ```bash

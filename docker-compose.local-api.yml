@@ -1,0 +1,27 @@
+services:
+  youtube_grup_bot:
+    depends_on:
+      - telegram_bot_api
+    environment:
+      TG_LOCAL_BOT_API_ENABLED: "true"
+    volumes:
+      # Shared with telegram_bot_api at the identical path so aiogram's
+      # is_local session can hand over local file paths instead of
+      # uploading over HTTP (see bot/main.py).
+      - bot_cache:/app/bot/cache
+
+  telegram_bot_api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram_bot_api
+    restart: always
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+    volumes:
+      - bot_cache:/app/bot/cache
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
+
+volumes:
+  bot_cache:
+  telegram_bot_api_data:

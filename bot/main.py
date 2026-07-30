@@ -3,6 +3,8 @@ import shutil
 
 from aiogram import Dispatcher
 from aiogram.client.bot import DefaultBotProperties, Bot
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -11,7 +13,13 @@ from loguru import logger
 
 from bot.downloader.router import register_handlers as register_downloader
 from bot.init import register_init
-from bot.settings import ALL_COMMANDS, BOT_NAME, CACHE_DIR, Env
+from bot.settings import ALL_COMMANDS, BOT_NAME, CACHE_DIR, Env, LOCAL_BOT_API_BASE_URL
+
+
+def build_bot_session() -> AiohttpSession | None:
+    if not LOCAL_BOT_API_BASE_URL:
+        return None
+    return AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_BOT_API_BASE_URL, is_local=True))
 
 
 async def in_start(bot: Bot):
@@ -32,7 +40,11 @@ async def in_stop():
 
 
 async def start_bot():
-    bot = Bot(token=Env.TG_MAIN_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
+    bot = Bot(
+        token=Env.TG_MAIN_BOT_TOKEN,
+        session=build_bot_session(),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
+    )
     dp = Dispatcher(storage=MemoryStorage())
 
     register_init(dp)

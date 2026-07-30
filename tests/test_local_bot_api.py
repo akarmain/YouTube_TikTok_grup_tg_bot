@@ -86,3 +86,18 @@ def test_compose_only_telegram_api_keys_are_ignored(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "SETTINGS_OK"
+
+
+def test_cache_reset_preserves_mount_point(tmp_path):
+    from bot.main import _reset_cache_dir
+
+    cache_dir = tmp_path / "cache"
+    nested_dir = cache_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    (cache_dir / "video.mp4").write_bytes(b"video")
+    (nested_dir / "fragment.tmp").write_bytes(b"fragment")
+
+    _reset_cache_dir(str(cache_dir))
+
+    assert cache_dir.is_dir()
+    assert list(cache_dir.iterdir()) == []

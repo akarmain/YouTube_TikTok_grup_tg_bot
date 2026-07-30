@@ -22,16 +22,23 @@ def build_bot_session() -> AiohttpSession | None:
     return AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_BOT_API_BASE_URL, is_local=True))
 
 
+def _reset_cache_dir(cache_dir: str) -> None:
+    os.makedirs(cache_dir, exist_ok=True)
+    with os.scandir(cache_dir) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+
+
 async def in_start(bot: Bot):
     commands = [
         BotCommand(command=name_cmd, description=desc)
         for name_cmd, desc in ALL_COMMANDS.items()
     ]
     await bot.set_my_commands(commands)
-    cache_dir = CACHE_DIR
-    if os.path.exists(cache_dir):
-        shutil.rmtree(cache_dir)
-    os.makedirs(cache_dir, exist_ok=True)
+    _reset_cache_dir(CACHE_DIR)
     logger.info(f"Aiogram START bot: @{BOT_NAME}")
 
 

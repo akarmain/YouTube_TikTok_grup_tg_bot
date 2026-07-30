@@ -7,11 +7,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 load_dotenv()
 
 
+CLOUD_API_MAX_VIDEO_SIZE_MB: Final = 49
+LOCAL_API_MAX_VIDEO_SIZE_MB: Final = 1950
+LOCAL_BOT_API_INTERNAL_URL: Final = "http://telegram_bot_api:8081"
+
+
 class Env(BaseSettings):
     TG_MAIN_BOT_TOKEN: str
     TG_ADMIN_ID: int = 912185600
-    TG_MAX_VIDEO_SIZE_MB: int = 1950
-    TG_LOCAL_BOT_API_BASE_URL: str | None = None
+    TG_LOCAL_BOT_API_ENABLED: bool = False
     TG_FFMPEG_THREADS: int | None = None
     TG_FFMPEG_MAX_JOBS: int = 1
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
@@ -33,9 +37,10 @@ CACHE_DIR = os.path.join(BASIC_DIR, "cache")
 Env = Env()
 DEFAULT_FFMPEG_THREADS = 1
 ADMIN_ID = Env.TG_ADMIN_ID
-MAX_VIDEO_SIZE_MB = Env.TG_MAX_VIDEO_SIZE_MB
+LOCAL_BOT_API_ENABLED = Env.TG_LOCAL_BOT_API_ENABLED
+LOCAL_BOT_API_BASE_URL = LOCAL_BOT_API_INTERNAL_URL if LOCAL_BOT_API_ENABLED else None
+MAX_VIDEO_SIZE_MB = LOCAL_API_MAX_VIDEO_SIZE_MB if LOCAL_BOT_API_ENABLED else CLOUD_API_MAX_VIDEO_SIZE_MB
 MAX_VIDEO_SIZE_BYTES = MAX_VIDEO_SIZE_MB * 1024 * 1024
-LOCAL_BOT_API_BASE_URL = (Env.TG_LOCAL_BOT_API_BASE_URL or "").strip() or None
 FFMPEG_THREADS = max(1, Env.TG_FFMPEG_THREADS or DEFAULT_FFMPEG_THREADS)
 FFMPEG_MAX_JOBS = max(1, Env.TG_FFMPEG_MAX_JOBS)
 JSON_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.json")

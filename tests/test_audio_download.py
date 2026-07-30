@@ -13,7 +13,7 @@ from aiogram.enums import ChatType
 
 os.environ.setdefault("TG_MAIN_BOT_TOKEN", "0:test")
 
-from bot.database.json_db import JsonDB  # noqa: E402
+from bot.database.json_db import SQLiteDB  # noqa: E402
 from bot.downloader import router  # noqa: E402
 from bot.downloader.media import MediaResult, VideoTooLargeError  # noqa: E402
 
@@ -158,10 +158,25 @@ def clean_pending_tokens():
     router._pending_youtube_urls.clear()
 
 
-class TestJsonDBMediaKindSeparation:
+@pytest_asyncio.fixture(autouse=True)
+async def workers(monkeypatch):
+    monkeypatch.setattr(router, "DOWNLOAD_WORKERS", 1)
+    await router.start_workers()
+    yield
+    await router.stop_workers()
+    if router._QUEUE is not None:
+        while not router._QUEUE.empty():
+            router._QUEUE.get_nowait()
+            router._QUEUE.task_done()
+        router._QUEUE = None
+
+
+class TestSQLiteDBMediaKindSeparation:
     @pytest_asyncio.fixture
     async def db(self, tmp_path):
-        return JsonDB(str(tmp_path / "db.json"))
+        instance = SQLiteDB(str(tmp_path / "db.sqlite3"))
+        yield instance
+        await instance.close()
 
     @pytest.mark.asyncio
     async def test_video_and_audio_file_ids_do_not_collide(self, db):
@@ -189,18 +204,6 @@ class TestJsonDBMediaKindSeparation:
         await db.upsert_video(url, "FILE", 1, "tiktok")
         assert await db.get_cached_file_id(url) == "FILE"
 
-    @pytest.mark.asyncio
-    async def test_legacy_record_without_media_kind_field_is_treated_as_video(self, db, tmp_path):
-        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        await db.upsert_video(url, "OLD_FILE", 1, "youtube")
-        data = db._load_unlocked()
-        for record in data["videos"].values():
-            record.pop("media_kind", None)
-        db._save_unlocked(data)
-
-        assert await db.get_cached_file_id(url, media_kind="video") == "OLD_FILE"
-        assert await db.get_cached_file_id(url, media_kind="audio") is None
-
 
 class TestYoutubeChoicePrompt:
     @pytest.mark.asyncio
@@ -227,6 +230,7 @@ class TestYoutubeChoicePrompt:
         bot = FakeBot()
         msg = FakeMessage(bot, text="https://www.tiktok.com/@user/video/123")
         await router.handle_media_url(msg)
+        await router._QUEUE.join()
 
         assert router._pending_youtube_urls == {}
         assert len(bot.sent_videos) == 1
@@ -240,6 +244,7 @@ class TestYoutubeChoicePrompt:
         bot = FakeBot()
         msg = FakeMessage(bot, chat_type=ChatType.CHANNEL)
         await router.handle_media_url(msg)
+        await router._QUEUE.join()
 
         assert router._pending_youtube_urls == {}
         assert len(bot.sent_videos) == 1
@@ -282,6 +287,7 @@ class TestYoutubeChoiceCallback:
 
         await router.handle_youtube_choice(first_click)
         await router.handle_youtube_choice(second_click)
+        await router._QUEUE.join()
 
         assert call_count == 1
         assert second_click.answers == [("Ссылка устарела, отправьте её ещё раз.", True)]
@@ -304,6 +310,7 @@ class TestYoutubeChoiceCallback:
         bot = FakeBot()
         callback = FakeCallbackQuery(f"ytchoice:audio:{token}", FakeStatusMessage(bot))
         await router.handle_youtube_choice(callback)
+        await router._QUEUE.join()
 
         assert bot.sent_audios[0]["title"] == "Ленинград - Экспонат"
         assert bot.sent_audios[0]["performer"] == "Артур Пирожков 🎵"
@@ -321,6 +328,7 @@ class TestYoutubeChoiceCallback:
         callback = FakeCallbackQuery(f"ytchoice:video:{token}", status, user_id=777)
 
         await router.handle_youtube_choice(callback)
+        await router._QUEUE.join()
 
         assert status.deleted is True
         assert len(bot.sent_videos) == 1
@@ -349,6 +357,7 @@ class TestYoutubeChoiceCallback:
         callback = FakeCallbackQuery(f"ytchoice:audio:{token}", status, user_id=777)
 
         await router.handle_youtube_choice(callback)
+        await router._QUEUE.join()
 
         assert len(bot.sent_audios) == 1
         sent = bot.sent_audios[0]
@@ -373,6 +382,7 @@ class TestYoutubeChoiceCallback:
         callback = FakeCallbackQuery(f"ytchoice:audio:{token}", status)
 
         await router.handle_youtube_choice(callback)
+        await router._QUEUE.join()
 
         assert bot.sent_audios[0]["audio"] == "CACHED_AUDIO_FILE"
 
@@ -389,6 +399,7 @@ class TestYoutubeChoiceCallback:
         callback = FakeCallbackQuery(f"ytchoice:video:{token}", status)
 
         await router.handle_youtube_choice(callback)
+        await router._QUEUE.join()
 
         assert bot.sent_videos == []
 
@@ -411,6 +422,7 @@ class TestYoutubeChoiceCallback:
         callback = FakeCallbackQuery(f"ytchoice:audio:{token}", status)
 
         await router.handle_youtube_choice(callback)
+        await router._QUEUE.join()
 
         assert not os.path.exists(audio_path)
         assert not os.path.exists(thumb_path)

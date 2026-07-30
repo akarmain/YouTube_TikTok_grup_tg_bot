@@ -13,7 +13,14 @@ os.environ.setdefault("TG_MAIN_BOT_TOKEN", "0:test")
 
 
 def _reload_with_env(monkeypatch, **env: str) -> tuple:
-    for key in ("TG_LOCAL_BOT_API_ENABLED",):
+    for key in (
+        "TG_LOCAL_BOT_API_ENABLED",
+        "YOUTUBE_FAST_DOWNLOAD_ENABLED",
+        "YOUTUBE_MIN_HEIGHT",
+        "YOUTUBE_MAX_HEIGHT",
+        "YOUTUBE_TARGET_SIZE_MB",
+        "YOUTUBE_CONCURRENT_FRAGMENTS",
+    ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -57,6 +64,31 @@ def test_max_video_size_rises_when_local_api_enabled(monkeypatch):
     settings, _ = _reload_with_env(monkeypatch, TG_LOCAL_BOT_API_ENABLED="true")
     assert settings.MAX_VIDEO_SIZE_MB == 1950
     assert settings.MAX_VIDEO_SIZE_BYTES == 1950 * 1024 * 1024
+
+
+def test_youtube_fast_download_defaults(monkeypatch):
+    settings, _ = _reload_with_env(monkeypatch)
+    assert settings.YOUTUBE_FAST_DOWNLOAD_ENABLED is True
+    assert settings.YOUTUBE_MIN_HEIGHT == 420
+    assert settings.YOUTUBE_MAX_HEIGHT == 720
+    assert settings.YOUTUBE_TARGET_SIZE_MB == 49
+    assert settings.YOUTUBE_CONCURRENT_FRAGMENTS == 4
+
+
+def test_youtube_fast_download_can_be_disabled_and_clamps_values(monkeypatch):
+    settings, _ = _reload_with_env(
+        monkeypatch,
+        YOUTUBE_FAST_DOWNLOAD_ENABLED="false",
+        YOUTUBE_MIN_HEIGHT="500",
+        YOUTUBE_MAX_HEIGHT="480",
+        YOUTUBE_TARGET_SIZE_MB="500",
+        YOUTUBE_CONCURRENT_FRAGMENTS="0",
+    )
+    assert settings.YOUTUBE_FAST_DOWNLOAD_ENABLED is False
+    assert settings.YOUTUBE_MIN_HEIGHT == 500
+    assert settings.YOUTUBE_MAX_HEIGHT == 500
+    assert settings.YOUTUBE_TARGET_SIZE_MB == 49
+    assert settings.YOUTUBE_CONCURRENT_FRAGMENTS == 1
 
 
 def test_compose_only_telegram_api_keys_are_ignored(tmp_path):

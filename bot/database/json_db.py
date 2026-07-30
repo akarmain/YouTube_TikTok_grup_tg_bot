@@ -1,28 +1,99 @@
 import asyncio
 import hashlib
 import json
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
-from bot.settings import JSON_DB_PATH
+import aiosqlite
+
+from bot.settings import SQLITE_DB_PATH
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    started_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS videos (
+    key TEXT PRIMARY KEY,
+    source_url TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    canonical_ref TEXT,
+    platform TEXT,
+    file_id TEXT,
+    first_sent_at TEXT NOT NULL,
+    last_sent_at TEXT NOT NULL,
+    send_count INTEGER NOT NULL DEFAULT 0,
+    sender_user_ids TEXT NOT NULL DEFAULT '[]',
+    invalidated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_videos_normalized_url ON videos(normalized_url);
+CREATE INDEX IF NOT EXISTS idx_videos_canonical_ref ON videos(canonical_ref);
+"""
+
+_UPSERT_USER_SQL = """
+INSERT INTO users (user_id, username, first_name, last_name, started_at, last_seen_at)
+VALUES (:user_id, :username, :first_name, :last_name, :now, :now)
+ON CONFLICT(user_id) DO UPDATE SET
+    username = excluded.username,
+    first_name = excluded.first_name,
+    last_name = excluded.last_name,
+    last_seen_at = excluded.last_seen_at
+"""
+
+_UPSERT_VIDEO_SQL = """
+INSERT INTO videos (
+    key, source_url, normalized_url, canonical_ref, platform, file_id,
+    first_sent_at, last_sent_at, send_count, sender_user_ids
+)
+VALUES (
+    :key, :source_url, :normalized_url, :canonical_ref, :platform, :file_id,
+    :now, :now, 1,
+    CASE WHEN :sender_id IS NULL THEN '[]' ELSE json_array(:sender_id) END
+)
+ON CONFLICT(key) DO UPDATE SET
+    source_url = excluded.source_url,
+    normalized_url = excluded.normalized_url,
+    canonical_ref = excluded.canonical_ref,
+    platform = excluded.platform,
+    file_id = excluded.file_id,
+    last_sent_at = excluded.last_sent_at,
+    send_count = videos.send_count + 1,
+    sender_user_ids = CASE WHEN :sender_id IS NULL THEN videos.sender_user_ids ELSE (
+        SELECT json_group_array(v) FROM (
+            SELECT value AS v FROM json_each(videos.sender_user_ids)
+            UNION
+            SELECT :sender_id
+        ) ORDER BY v
+    ) END
+"""
+
+_INVALIDATE_VIDEO_SQL = """
+UPDATE videos SET file_id = NULL, invalidated_at = :now
+WHERE file_id IS NOT NULL AND (
+    key IN (:normalized_key, :legacy_key, :canonical_key) OR
+    normalized_url = :normalized_url OR
+    (:canonical_ref IS NOT NULL AND canonical_ref = :canonical_ref)
+)
+"""
 
 
-class JsonDB:
+class SQLiteDB:
     def __init__(self, db_path: str):
         self._db_path = Path(db_path)
-        self._lock = asyncio.Lock()
+        self._conn: aiosqlite.Connection | None = None
+        self._connect_lock = asyncio.Lock()
 
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
-
-    @staticmethod
-    def _empty() -> dict[str, Any]:
-        return {"users": {}, "videos": {}}
 
     @staticmethod
     def _normalized_host(host: str) -> str:
@@ -44,32 +115,10 @@ class JsonDB:
         query = urlencode(query_items, doseq=True)
         return urlunparse((scheme, host, path, "", query, ""))
 
-    def _load_unlocked(self) -> dict[str, Any]:
-        if not self._db_path.exists():
-            return self._empty()
-        try:
-            with self._db_path.open("r", encoding="utf-8") as file:
-                data = json.load(file)
-        except (json.JSONDecodeError, OSError):
-            return self._empty()
-
-        if not isinstance(data, dict):
-            return self._empty()
-        data.setdefault("users", {})
-        data.setdefault("videos", {})
-        return data
-
-    def _save_unlocked(self, data: dict[str, Any]) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self._db_path.with_suffix(f"{self._db_path.suffix}.tmp")
-        with temp_path.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-        os.replace(temp_path, self._db_path)
-
     @staticmethod
     def _extract_youtube_id(url: str) -> str | None:
         parsed = urlparse(url)
-        host = JsonDB._normalized_host(parsed.netloc)
+        host = SQLiteDB._normalized_host(parsed.netloc)
         path = parsed.path.strip("/")
 
         if "youtu.be" in host and path:
@@ -122,6 +171,26 @@ class JsonDB:
     def _video_key(seed: str) -> str:
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
+    async def _connection(self) -> aiosqlite.Connection:
+        if self._conn is not None:
+            return self._conn
+        async with self._connect_lock:
+            if self._conn is None:
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = await aiosqlite.connect(self._db_path)
+                await conn.execute("PRAGMA journal_mode=WAL")
+                await conn.execute("PRAGMA synchronous=NORMAL")
+                await conn.execute("PRAGMA busy_timeout=5000")
+                await conn.executescript(SCHEMA_SQL)
+                await conn.commit()
+                self._conn = conn
+        return self._conn
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
     async def upsert_user(
         self,
         user_id: int,
@@ -129,20 +198,18 @@ class JsonDB:
         first_name: str | None,
         last_name: str | None,
     ) -> None:
-        async with self._lock:
-            data = self._load_unlocked()
-            users = data["users"]
-            key = str(user_id)
-            now = self._now_iso()
-
-            user_record = users.get(key, {"user_id": user_id, "started_at": now})
-            user_record["username"] = username
-            user_record["first_name"] = first_name
-            user_record["last_name"] = last_name
-            user_record["last_seen_at"] = now
-
-            users[key] = user_record
-            self._save_unlocked(data)
+        conn = await self._connection()
+        await conn.execute(
+            _UPSERT_USER_SQL,
+            {
+                "user_id": user_id,
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+                "now": self._now_iso(),
+            },
+        )
+        await conn.commit()
 
     async def upsert_video(
         self,
@@ -151,131 +218,120 @@ class JsonDB:
         sender_user_id: int | None,
         platform: str | None = None,
     ) -> None:
-        async with self._lock:
-            data = self._load_unlocked()
-            videos = data["videos"]
-            normalized_url = self._normalize_source_url(source_url)
-            canonical_ref, detected_platform = self._canonical_video_ref(source_url)
-            key = self._video_key(normalized_url)
-            now = self._now_iso()
+        conn = await self._connection()
+        normalized_url = self._normalize_source_url(source_url)
+        canonical_ref, detected_platform = self._canonical_video_ref(source_url)
+        await conn.execute(
+            _UPSERT_VIDEO_SQL,
+            {
+                "key": self._video_key(normalized_url),
+                "source_url": source_url,
+                "normalized_url": normalized_url,
+                "canonical_ref": canonical_ref,
+                "platform": platform or detected_platform,
+                "file_id": file_id,
+                "now": self._now_iso(),
+                "sender_id": sender_user_id,
+            },
+        )
+        await conn.commit()
 
-            video_record = videos.get(
-                key,
-                {
-                    "source_url": source_url,
-                    "normalized_url": normalized_url,
-                    "canonical_ref": canonical_ref,
-                    "platform": platform or detected_platform,
-                    "first_sent_at": now,
-                    "send_count": 0,
-                    "sender_user_ids": [],
-                },
-            )
-            video_record["source_url"] = source_url
-            video_record["normalized_url"] = normalized_url
-            video_record["canonical_ref"] = canonical_ref
-            video_record["platform"] = platform or detected_platform
-            video_record["file_id"] = file_id
-            video_record["last_sent_at"] = now
-            video_record["send_count"] = int(video_record.get("send_count", 0)) + 1
-
-            if sender_user_id is not None:
-                sender_ids = set(video_record.get("sender_user_ids", []))
-                sender_ids.add(sender_user_id)
-                video_record["sender_user_ids"] = sorted(sender_ids)
-
-            videos[key] = video_record
-            self._save_unlocked(data)
+    async def _file_id_by_key(self, conn: aiosqlite.Connection, key: str) -> str | None:
+        async with conn.execute(
+            "SELECT file_id FROM videos WHERE key = ? AND file_id IS NOT NULL", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
 
     async def get_cached_file_id(self, source_url: str) -> str | None:
-        async with self._lock:
-            data = self._load_unlocked()
-            videos = data.get("videos", {})
-            normalized_url = self._normalize_source_url(source_url)
+        conn = await self._connection()
+        normalized_url = self._normalize_source_url(source_url)
 
-            exact_key = self._video_key(normalized_url)
-            record = videos.get(exact_key)
-            if record and record.get("file_id"):
-                return str(record["file_id"])
+        file_id = await self._file_id_by_key(conn, self._video_key(normalized_url))
+        if file_id:
+            return file_id
 
-            legacy_key = self._video_key(source_url.strip())
-            legacy_record = videos.get(legacy_key)
-            if legacy_record and legacy_record.get("file_id"):
-                return str(legacy_record["file_id"])
+        file_id = await self._file_id_by_key(conn, self._video_key(source_url.strip()))
+        if file_id:
+            return file_id
 
-            for record in videos.values():
-                if not isinstance(record, dict):
-                    continue
-                if record.get("normalized_url") == normalized_url and record.get("file_id"):
-                    return str(record["file_id"])
+        async with conn.execute(
+            "SELECT file_id FROM videos WHERE normalized_url = ? AND file_id IS NOT NULL "
+            "ORDER BY rowid LIMIT 1",
+            (normalized_url,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
 
-            canonical_ref, _ = self._canonical_video_ref(source_url)
-            if not canonical_ref:
-                return None
-
-            key = self._video_key(canonical_ref)
-            record = videos.get(key)
-            if record and record.get("file_id") and record.get("canonical_ref") == canonical_ref:
-                return str(record["file_id"])
-
-            matched_records = [
-                record
-                for record in videos.values()
-                if isinstance(record, dict)
-                and record.get("canonical_ref") == canonical_ref
-                and record.get("file_id")
-            ]
-            if matched_records:
-                matched_records.sort(key=lambda row: str(row.get("last_sent_at", "")), reverse=True)
-                return str(matched_records[0]["file_id"])
+        canonical_ref, _ = self._canonical_video_ref(source_url)
+        if not canonical_ref:
             return None
 
+        async with conn.execute(
+            "SELECT file_id FROM videos WHERE key = ? AND canonical_ref = ? AND file_id IS NOT NULL",
+            (self._video_key(canonical_ref), canonical_ref),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+
+        async with conn.execute(
+            "SELECT file_id FROM videos WHERE canonical_ref = ? AND file_id IS NOT NULL "
+            "ORDER BY last_sent_at DESC LIMIT 1",
+            (canonical_ref,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
     async def invalidate_cached_file_id(self, source_url: str) -> None:
-        async with self._lock:
-            data = self._load_unlocked()
-            videos = data.get("videos", {})
-            normalized_url = self._normalize_source_url(source_url)
-            canonical_ref, _ = self._canonical_video_ref(source_url)
+        conn = await self._connection()
+        normalized_url = self._normalize_source_url(source_url)
+        canonical_ref, _ = self._canonical_video_ref(source_url)
+        normalized_key = self._video_key(normalized_url)
+        canonical_key = self._video_key(canonical_ref) if canonical_ref else normalized_key
 
-            keys_to_invalidate = {
-                self._video_key(normalized_url),
-                self._video_key(source_url.strip()),
-            }
-            if canonical_ref:
-                keys_to_invalidate.add(self._video_key(canonical_ref))
-
-            for key in keys_to_invalidate:
-                if key in videos and videos[key].get("file_id"):
-                    videos[key]["file_id"] = None
-                    videos[key]["invalidated_at"] = self._now_iso()
-
-            for record in videos.values():
-                if not isinstance(record, dict) or not record.get("file_id"):
-                    continue
-                if record.get("normalized_url") == normalized_url or (
-                    canonical_ref and record.get("canonical_ref") == canonical_ref
-                ):
-                    record["file_id"] = None
-                    record["invalidated_at"] = self._now_iso()
-
-            self._save_unlocked(data)
+        await conn.execute(
+            _INVALIDATE_VIDEO_SQL,
+            {
+                "now": self._now_iso(),
+                "normalized_key": normalized_key,
+                "legacy_key": self._video_key(source_url.strip()),
+                "canonical_key": canonical_key,
+                "normalized_url": normalized_url,
+                "canonical_ref": canonical_ref,
+            },
+        )
+        await conn.commit()
 
     async def export_users_file(self) -> str:
-        async with self._lock:
-            data = self._load_unlocked()
-            users = sorted(
-                data.get("users", {}).values(),
-                key=lambda row: int(row.get("user_id", 0)),
-            )
-            export_payload = {
-                "exported_at": self._now_iso(),
-                "total_users": len(users),
-                "users": users,
+        conn = await self._connection()
+        async with conn.execute(
+            "SELECT user_id, username, first_name, last_name, started_at, last_seen_at "
+            "FROM users ORDER BY user_id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        users = [
+            {
+                "user_id": row[0],
+                "username": row[1],
+                "first_name": row[2],
+                "last_name": row[3],
+                "last_seen_at": row[5],
+                "started_at": row[4],
             }
-            export_path = self._db_path.parent / "users_export.json"
-            with export_path.open("w", encoding="utf-8") as file:
-                json.dump(export_payload, file, ensure_ascii=False, indent=2)
+            for row in rows
+        ]
+        export_payload = {
+            "exported_at": self._now_iso(),
+            "total_users": len(users),
+            "users": users,
+        }
+        export_path = self._db_path.parent / "users_export.json"
+        with export_path.open("w", encoding="utf-8") as file:
+            json.dump(export_payload, file, ensure_ascii=False, indent=2)
         return str(export_path)
 
 
-json_db = JsonDB(JSON_DB_PATH)
+json_db = SQLiteDB(SQLITE_DB_PATH)

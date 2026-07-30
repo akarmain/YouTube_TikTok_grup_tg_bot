@@ -10,7 +10,8 @@ load_dotenv()
 class Env(BaseSettings):
     TG_MAIN_BOT_TOKEN: str
     TG_ADMIN_ID: int = 912185600
-    TG_MAX_VIDEO_SIZE_MB: int = 49
+    TG_MAX_VIDEO_SIZE_MB: int = 1950
+    TG_LOCAL_BOT_API_BASE_URL: str | None = None
     TG_FFMPEG_THREADS: int | None = None
     TG_FFMPEG_MAX_JOBS: int = 1
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
@@ -34,6 +35,7 @@ DEFAULT_FFMPEG_THREADS = 1
 ADMIN_ID = Env.TG_ADMIN_ID
 MAX_VIDEO_SIZE_MB = Env.TG_MAX_VIDEO_SIZE_MB
 MAX_VIDEO_SIZE_BYTES = MAX_VIDEO_SIZE_MB * 1024 * 1024
+LOCAL_BOT_API_BASE_URL = (Env.TG_LOCAL_BOT_API_BASE_URL or "").strip() or None
 FFMPEG_THREADS = max(1, Env.TG_FFMPEG_THREADS or DEFAULT_FFMPEG_THREADS)
 FFMPEG_MAX_JOBS = max(1, Env.TG_FFMPEG_MAX_JOBS)
 JSON_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.json")

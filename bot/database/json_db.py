@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS videos (
     normalized_url TEXT NOT NULL,
     canonical_ref TEXT,
     platform TEXT,
+    media_kind TEXT NOT NULL DEFAULT 'video',
     file_id TEXT,
     first_sent_at TEXT NOT NULL,
     last_sent_at TEXT NOT NULL,
@@ -34,8 +35,8 @@ CREATE TABLE IF NOT EXISTS videos (
     invalidated_at TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_videos_normalized_url ON videos(normalized_url);
-CREATE INDEX IF NOT EXISTS idx_videos_canonical_ref ON videos(canonical_ref);
+CREATE INDEX IF NOT EXISTS idx_videos_normalized_url ON videos(normalized_url, media_kind);
+CREATE INDEX IF NOT EXISTS idx_videos_canonical_ref ON videos(canonical_ref, media_kind);
 """
 
 _UPSERT_USER_SQL = """
@@ -50,11 +51,11 @@ ON CONFLICT(user_id) DO UPDATE SET
 
 _UPSERT_VIDEO_SQL = """
 INSERT INTO videos (
-    key, source_url, normalized_url, canonical_ref, platform, file_id,
+    key, source_url, normalized_url, canonical_ref, platform, media_kind, file_id,
     first_sent_at, last_sent_at, send_count, sender_user_ids
 )
 VALUES (
-    :key, :source_url, :normalized_url, :canonical_ref, :platform, :file_id,
+    :key, :source_url, :normalized_url, :canonical_ref, :platform, :media_kind, :file_id,
     :now, :now, 1,
     CASE WHEN :sender_id IS NULL THEN '[]' ELSE json_array(:sender_id) END
 )
@@ -63,6 +64,7 @@ ON CONFLICT(key) DO UPDATE SET
     normalized_url = excluded.normalized_url,
     canonical_ref = excluded.canonical_ref,
     platform = excluded.platform,
+    media_kind = excluded.media_kind,
     file_id = excluded.file_id,
     last_sent_at = excluded.last_sent_at,
     send_count = videos.send_count + 1,
@@ -79,8 +81,8 @@ _INVALIDATE_VIDEO_SQL = """
 UPDATE videos SET file_id = NULL, invalidated_at = :now
 WHERE file_id IS NOT NULL AND (
     key IN (:normalized_key, :legacy_key, :canonical_key) OR
-    normalized_url = :normalized_url OR
-    (:canonical_ref IS NOT NULL AND canonical_ref = :canonical_ref)
+    (normalized_url = :normalized_url AND media_kind = :media_kind) OR
+    (:canonical_ref IS NOT NULL AND canonical_ref = :canonical_ref AND media_kind = :media_kind)
 )
 """
 
@@ -168,8 +170,9 @@ class SQLiteDB:
         return None, "unknown"
 
     @staticmethod
-    def _video_key(seed: str) -> str:
-        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    def _video_key(seed: str, media_kind: str = "video") -> str:
+        prefixed_seed = seed if media_kind == "video" else f"{media_kind}:{seed}"
+        return hashlib.sha256(prefixed_seed.encode("utf-8")).hexdigest()
 
     async def _connection(self) -> aiosqlite.Connection:
         if self._conn is not None:
@@ -217,6 +220,7 @@ class SQLiteDB:
         file_id: str,
         sender_user_id: int | None,
         platform: str | None = None,
+        media_kind: str = "video",
     ) -> None:
         conn = await self._connection()
         normalized_url = self._normalize_source_url(source_url)
@@ -224,11 +228,12 @@ class SQLiteDB:
         await conn.execute(
             _UPSERT_VIDEO_SQL,
             {
-                "key": self._video_key(normalized_url),
+                "key": self._video_key(normalized_url, media_kind),
                 "source_url": source_url,
                 "normalized_url": normalized_url,
                 "canonical_ref": canonical_ref,
                 "platform": platform or detected_platform,
+                "media_kind": media_kind,
                 "file_id": file_id,
                 "now": self._now_iso(),
                 "sender_id": sender_user_id,
@@ -243,22 +248,22 @@ class SQLiteDB:
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def get_cached_file_id(self, source_url: str) -> str | None:
+    async def get_cached_file_id(self, source_url: str, media_kind: str = "video") -> str | None:
         conn = await self._connection()
         normalized_url = self._normalize_source_url(source_url)
 
-        file_id = await self._file_id_by_key(conn, self._video_key(normalized_url))
+        file_id = await self._file_id_by_key(conn, self._video_key(normalized_url, media_kind))
         if file_id:
             return file_id
 
-        file_id = await self._file_id_by_key(conn, self._video_key(source_url.strip()))
+        file_id = await self._file_id_by_key(conn, self._video_key(source_url.strip(), media_kind))
         if file_id:
             return file_id
 
         async with conn.execute(
-            "SELECT file_id FROM videos WHERE normalized_url = ? AND file_id IS NOT NULL "
+            "SELECT file_id FROM videos WHERE normalized_url = ? AND media_kind = ? AND file_id IS NOT NULL "
             "ORDER BY rowid LIMIT 1",
-            (normalized_url,),
+            (normalized_url, media_kind),
         ) as cursor:
             row = await cursor.fetchone()
             if row:
@@ -270,36 +275,37 @@ class SQLiteDB:
 
         async with conn.execute(
             "SELECT file_id FROM videos WHERE key = ? AND canonical_ref = ? AND file_id IS NOT NULL",
-            (self._video_key(canonical_ref), canonical_ref),
+            (self._video_key(canonical_ref, media_kind), canonical_ref),
         ) as cursor:
             row = await cursor.fetchone()
             if row:
                 return row[0]
 
         async with conn.execute(
-            "SELECT file_id FROM videos WHERE canonical_ref = ? AND file_id IS NOT NULL "
+            "SELECT file_id FROM videos WHERE canonical_ref = ? AND media_kind = ? AND file_id IS NOT NULL "
             "ORDER BY last_sent_at DESC LIMIT 1",
-            (canonical_ref,),
+            (canonical_ref, media_kind),
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def invalidate_cached_file_id(self, source_url: str) -> None:
+    async def invalidate_cached_file_id(self, source_url: str, media_kind: str = "video") -> None:
         conn = await self._connection()
         normalized_url = self._normalize_source_url(source_url)
         canonical_ref, _ = self._canonical_video_ref(source_url)
-        normalized_key = self._video_key(normalized_url)
-        canonical_key = self._video_key(canonical_ref) if canonical_ref else normalized_key
+        normalized_key = self._video_key(normalized_url, media_kind)
+        canonical_key = self._video_key(canonical_ref, media_kind) if canonical_ref else normalized_key
 
         await conn.execute(
             _INVALIDATE_VIDEO_SQL,
             {
                 "now": self._now_iso(),
                 "normalized_key": normalized_key,
-                "legacy_key": self._video_key(source_url.strip()),
+                "legacy_key": self._video_key(source_url.strip(), media_kind),
                 "canonical_key": canonical_key,
                 "normalized_url": normalized_url,
                 "canonical_ref": canonical_ref,
+                "media_kind": media_kind,
             },
         )
         await conn.commit()

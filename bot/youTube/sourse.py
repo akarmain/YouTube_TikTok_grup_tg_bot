@@ -1,27 +1,40 @@
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from loguru import logger
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from bot.downloader.media import MediaResult, VideoTooLargeError
 from bot.downloader.video_tools import (
+    compress_to_limit,
     extract_dimensions,
     needs_telegram_normalization,
     normalize_for_telegram,
     resolve_output_path,
 )
-from bot.settings import CACHE_DIR, MAX_VIDEO_SIZE_BYTES, MAX_VIDEO_SIZE_MB, YOUTUBE_COOKIES
+from bot.settings import (
+    CACHE_DIR,
+    MAX_VIDEO_SIZE_BYTES,
+    MAX_VIDEO_SIZE_MB,
+    YOUTUBE_CONCURRENT_FRAGMENTS,
+    YOUTUBE_COOKIES,
+    YOUTUBE_FAST_DOWNLOAD_ENABLED,
+    YOUTUBE_MAX_HEIGHT,
+    YOUTUBE_MIN_HEIGHT,
+    YOUTUBE_TARGET_SIZE_BYTES,
+    YOUTUBE_TARGET_SIZE_MB,
+)
 
-MIN_HEIGHT = 420
-
-# Prefer >=420p when available, then fallback to best available stream.
+# Legacy selectors are intentionally kept intact so the fast mode can be
+# disabled instantly with YOUTUBE_FAST_DOWNLOAD_ENABLED=false.
 PREFERRED_FORMAT_SELECTOR = (
-    f"bv*[height>={MIN_HEIGHT}]+ba/"
-    f"b[height>={MIN_HEIGHT}]/"
+    f"bv*[height>={YOUTUBE_MIN_HEIGHT}]+ba/"
+    f"b[height>={YOUTUBE_MIN_HEIGHT}]/"
     "bv*+ba/"
     "b"
 )
@@ -31,6 +44,54 @@ LAST_RESORT_FORMAT_SELECTOR = "bestvideo+bestaudio/best"
 # ponytail: download budget of 4x the send limit — bigger files are rejected before
 # download, smaller ones get the 720p/480p/360p compression fallback after download.
 DOWNLOAD_BUDGET_BYTES = MAX_VIDEO_SIZE_BYTES * 4
+
+
+def _fast_quality_caps(min_height: int, max_height: int) -> tuple[int, ...]:
+    """Return descending quality attempts without going below the minimum."""
+    caps = [max_height]
+    for cap in (720, 480):
+        if min_height <= cap < max_height:
+            caps.append(cap)
+    return tuple(dict.fromkeys(caps))
+
+
+def _fast_format_selector(min_height: int, max_height: int) -> str:
+    bounds = f"[height>={min_height}][height<={max_height}][fps<=?30]"
+    return (
+        f"bv{bounds}[vcodec^=avc1]+ba[acodec^=mp4a]/"
+        f"b{bounds}[vcodec^=avc1][acodec^=mp4a]/"
+        f"bv{bounds}+ba/"
+        f"b{bounds}"
+    )
+
+
+def _fast_low_quality_fallback_selector(max_height: int) -> str:
+    bounds = f"[height<=?{max_height}][fps<=?30]"
+    return f"bv{bounds}+ba/b{bounds}"
+
+
+def _video_download_attempts() -> tuple[tuple[str, int | None], ...]:
+    if not YOUTUBE_FAST_DOWNLOAD_ENABLED:
+        return (
+            (PREFERRED_FORMAT_SELECTOR, None),
+            (FALLBACK_FORMAT_SELECTOR, None),
+            (LAST_RESORT_FORMAT_SELECTOR, None),
+        )
+
+    attempts = [
+        (_fast_format_selector(YOUTUBE_MIN_HEIGHT, cap), cap)
+        for cap in _fast_quality_caps(YOUTUBE_MIN_HEIGHT, YOUTUBE_MAX_HEIGHT)
+    ]
+    # Only reached when no format at or above the requested minimum exists.
+    attempts.append((_fast_low_quality_fallback_selector(YOUTUBE_MAX_HEIGHT), None))
+    return tuple(attempts)
+
+
+def _fast_compression_steps(min_height: int, max_height: int) -> tuple[tuple[int, int], ...]:
+    heights = [max_height]
+    if min_height <= 480 < max_height:
+        heights.append(480)
+    return tuple((height, 23 if index == 0 else 26) for index, height in enumerate(heights))
 
 
 def _is_youtube_url(url: str) -> bool:
@@ -80,8 +141,63 @@ def _validate_before_download(info: dict[str, Any]) -> None:
         )
 
 
+def _try_smaller_quality(
+    info: dict[str, Any],
+    attempts: tuple[tuple[str, int | None], ...],
+    attempt_index: int,
+) -> bool:
+    if not YOUTUBE_FAST_DOWNLOAD_ENABLED:
+        return False
+    size_bytes = _extract_selected_size_bytes(info)
+    if size_bytes is None or size_bytes <= YOUTUBE_TARGET_SIZE_BYTES:
+        return False
+    if attempt_index + 1 >= len(attempts):
+        return False
+    next_cap = attempts[attempt_index + 1][1]
+    if next_cap is None:
+        return False
+
+    logger.info(
+        "YouTube fast mode: estimated size {:.1f} MB exceeds target {} MB; "
+        "trying at most {}p",
+        size_bytes / (1024 * 1024),
+        YOUTUBE_TARGET_SIZE_MB,
+        next_cap,
+    )
+    return True
+
+
+def _fit_fast_target(filepath: str) -> str:
+    if not YOUTUBE_FAST_DOWNLOAD_ENABLED:
+        return filepath
+    size_bytes = os.path.getsize(filepath)
+    if size_bytes <= YOUTUBE_TARGET_SIZE_BYTES:
+        return filepath
+
+    logger.info(
+        "YouTube fast mode: downloaded file is {:.1f} MB; compressing toward {} MB",
+        size_bytes / (1024 * 1024),
+        YOUTUBE_TARGET_SIZE_MB,
+    )
+    fitted = compress_to_limit(
+        filepath,
+        YOUTUBE_TARGET_SIZE_BYTES,
+        steps=_fast_compression_steps(YOUTUBE_MIN_HEIGHT, YOUTUBE_MAX_HEIGHT),
+    )
+    if fitted:
+        return fitted
+    logger.warning(
+        "YouTube fast mode: could not reach target {} MB without dropping below {}p; "
+        "keeping the capped source",
+        YOUTUBE_TARGET_SIZE_MB,
+        YOUTUBE_MIN_HEIGHT,
+    )
+    return filepath
+
+
 def _download_video_sync(url: str) -> MediaResult:
     Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    started_at = time.monotonic()
 
     base_options: dict[str, Any] = {
         "merge_output_format": "mp4",
@@ -98,6 +214,8 @@ def _download_video_sync(url: str) -> MediaResult:
         "fragment_retries": 3,
         "skip_unavailable_fragments": True,
     }
+    if YOUTUBE_FAST_DOWNLOAD_ENABLED:
+        base_options["concurrent_fragment_downloads"] = YOUTUBE_CONCURRENT_FRAGMENTS
 
     if _is_youtube_url(url):
         base_options["remote_components"] = ["ejs:github"]
@@ -105,26 +223,41 @@ def _download_video_sync(url: str) -> MediaResult:
             base_options["cookiefile"] = YOUTUBE_COOKIES
 
     last_exc: DownloadError | None = None
-    selectors = (
-        PREFERRED_FORMAT_SELECTOR,
-        FALLBACK_FORMAT_SELECTOR,
-        LAST_RESORT_FORMAT_SELECTOR,
-    )
-    for index, format_selector in enumerate(selectors):
+    attempts = _video_download_attempts()
+    for index, (format_selector, height_cap) in enumerate(attempts):
         options = {**base_options, "format": format_selector}
         with YoutubeDL(options) as ydl:
             try:
                 probe_info = ydl.extract_info(url, download=False)
                 _validate_before_download(probe_info)
+                if _try_smaller_quality(probe_info, attempts, index):
+                    continue
                 info = ydl.extract_info(url, download=True)
                 filepath = resolve_output_path(info, ydl)
                 if needs_telegram_normalization(info):
                     try:
-                        filepath = normalize_for_telegram(filepath)
-                    except RuntimeError:
+                        if YOUTUBE_FAST_DOWNLOAD_ENABLED:
+                            filepath = normalize_for_telegram(
+                                filepath,
+                                max_height=height_cap or YOUTUBE_MAX_HEIGHT,
+                                crf=23,
+                            )
+                        else:
+                            filepath = normalize_for_telegram(filepath)
+                    except RuntimeError as exc:
                         # Keep original downloaded file if ffmpeg normalization fails.
-                        pass
+                        logger.warning("YouTube normalization failed: {}", exc)
+                filepath = _fit_fast_target(filepath)
                 width, height = extract_dimensions(info)
+                logger.info(
+                    "YouTube video ready: fast_mode={} elapsed={:.1f}s size={:.1f} MB "
+                    "selected_height={}p cap={}p",
+                    YOUTUBE_FAST_DOWNLOAD_ENABLED,
+                    time.monotonic() - started_at,
+                    os.path.getsize(filepath) / (1024 * 1024),
+                    height,
+                    height_cap or YOUTUBE_MAX_HEIGHT,
+                )
                 return MediaResult(
                     platform="youtube",
                     source_url=url,
@@ -140,7 +273,7 @@ def _download_video_sync(url: str) -> MediaResult:
                 raise
             except DownloadError as exc:
                 last_exc = exc
-                if index < len(selectors) - 1:
+                if index < len(attempts) - 1:
                     continue
                 raise RuntimeError(f"Download error: {exc}") from exc
 

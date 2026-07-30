@@ -114,15 +114,19 @@ def build_slideshow(image_paths: list[str], audio_path: str | None, out_path: st
         raise RuntimeError(f"ffmpeg slideshow failed: {' | '.join(tail) or 'unknown error'}")
 
 
-def compress_to_limit(path: str, limit_bytes: int = MAX_VIDEO_SIZE_BYTES) -> str | None:
-    """Recompresses to 720p/480p/360p until the file fits. Returns the fitting path or None.
+def compress_to_limit(
+    path: str,
+    limit_bytes: int = MAX_VIDEO_SIZE_BYTES,
+    steps: tuple[tuple[int, int], ...] = COMPRESSION_STEPS,
+) -> str | None:
+    """Recompresses through the configured steps until the file fits.
 
     On success the original file is replaced (deleted); on failure the original is kept.
     """
     if os.path.getsize(path) <= limit_bytes:
         return path
     src = Path(path)
-    for height, crf in COMPRESSION_STEPS:
+    for height, crf in steps:
         dest = src.with_name(f"{src.stem}.c{height}.mp4")
         command = ffmpeg_command(
             "-y",
@@ -217,21 +221,35 @@ def needs_telegram_normalization(info: dict[str, Any]) -> bool:
     return not (video_ok and audio_ok and fps_ok and container_ok)
 
 
-def normalize_for_telegram(path: str) -> str:
+def _normalization_scale_args(max_height: int | None) -> list[str]:
+    if max_height is None:
+        return []
+    return ["-vf", f"scale=-2:min({max_height}\\,ih)"]
+
+
+def normalize_for_telegram(
+    path: str,
+    *,
+    max_height: int | None = None,
+    crf: int = 20,
+) -> str:
     src_path = Path(path)
     normalized_path = src_path.with_name(f"{src_path.stem}.tgfix.mp4")
+    scale_args = _normalization_scale_args(max_height)
+    relaxed_crf = max(22, crf + 2)
 
     strict_command = ffmpeg_command(
         "-y",
         "-i", str(src_path),
         "-map", "0:v:0",
         "-map", "0:a:0?",
+        *scale_args,
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-profile:v", "high",
         "-level:v", "4.1",
         "-preset", "veryfast",
-        "-crf", "20",
+        "-crf", str(crf),
         "-r", "30",
         "-g", "60",
         "-keyint_min", "60",
@@ -248,10 +266,11 @@ def normalize_for_telegram(path: str) -> str:
         "-i", str(src_path),
         "-map", "0:v:0",
         "-map", "0:a:0?",
+        *scale_args,
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
-        "-crf", "22",
+        "-crf", str(relaxed_crf),
         "-r", "30",
         "-c:a", "aac",
         "-b:a", "128k",

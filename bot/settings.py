@@ -37,6 +37,7 @@ MAX_VIDEO_SIZE_BYTES = MAX_VIDEO_SIZE_MB * 1024 * 1024
 FFMPEG_THREADS = max(1, Env.TG_FFMPEG_THREADS or DEFAULT_FFMPEG_THREADS)
 FFMPEG_MAX_JOBS = max(1, Env.TG_FFMPEG_MAX_JOBS)
 JSON_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.json")
+SQLITE_DB_PATH = os.path.join(BASIC_DIR, "database", "users_videos.sqlite3")
 YOUTUBE_COOKIES = os.path.join(BASIC_DIR, "youTube/cookies.txt")
 TIKTOK_COOKIES = os.path.join(BASIC_DIR, "tiktok", "cookies.txt")
 INSTAGRAM_COOKIES = os.path.join(BASIC_DIR, "instagram", "cookies.txt")

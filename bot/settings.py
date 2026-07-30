@@ -19,7 +19,11 @@ class Env(BaseSettings):
     TG_FFMPEG_THREADS: int | None = None
     TG_FFMPEG_MAX_JOBS: int | None = None
     TG_DOWNLOAD_WORKERS: int | None = None
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 def compute_ffmpeg_concurrency(

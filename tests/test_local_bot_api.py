@@ -5,6 +5,9 @@ Run: pytest tests/test_local_bot_api.py
 
 import importlib
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 os.environ.setdefault("TG_MAIN_BOT_TOKEN", "0:test")
 
@@ -54,3 +57,32 @@ def test_max_video_size_rises_when_local_api_enabled(monkeypatch):
     settings, _ = _reload_with_env(monkeypatch, TG_LOCAL_BOT_API_ENABLED="true")
     assert settings.MAX_VIDEO_SIZE_MB == 1950
     assert settings.MAX_VIDEO_SIZE_BYTES == 1950 * 1024 * 1024
+
+
+def test_compose_only_telegram_api_keys_are_ignored(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "TG_MAIN_BOT_TOKEN=0:test",
+                "TG_LOCAL_BOT_API_ENABLED=true",
+                "TELEGRAM_API_ID=123456",
+                "TELEGRAM_API_HASH=test-hash",
+            )
+        ),
+        encoding="utf-8",
+    )
+    project_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(project_root)
+    completed = subprocess.run(
+        [sys.executable, "-c", "import bot.settings; print('SETTINGS_OK')"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "SETTINGS_OK"

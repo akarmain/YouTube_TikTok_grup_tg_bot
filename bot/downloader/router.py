@@ -134,6 +134,7 @@ def _youtube_choice_keyboard(token: str) -> InlineKeyboardMarkup:
 async def _send_video(msg: Message, video: str | FSInputFile, width: int | None = None, height: int | None = None) -> Message:
     return await msg.bot.send_video(
         chat_id=msg.chat.id,
+        message_thread_id=msg.message_thread_id if msg.is_topic_message else None,
         video=video,
         supports_streaming=True,
         width=width,
@@ -142,13 +143,18 @@ async def _send_video(msg: Message, video: str | FSInputFile, width: int | None 
 
 
 async def _send_cached_audio(msg: Message, file_id: str) -> Message:
-    return await msg.bot.send_audio(chat_id=msg.chat.id, audio=file_id)
+    return await msg.bot.send_audio(
+        chat_id=msg.chat.id,
+        message_thread_id=msg.message_thread_id if msg.is_topic_message else None,
+        audio=file_id,
+    )
 
 
 async def _send_fresh_audio(msg: Message, result: MediaResult) -> Message:
     thumbnail = FSInputFile(result.thumbnail_path) if result.thumbnail_path else None
     return await msg.bot.send_audio(
         chat_id=msg.chat.id,
+        message_thread_id=msg.message_thread_id if msg.is_topic_message else None,
         audio=FSInputFile(result.path),
         title=result.title,
         performer=result.performer,

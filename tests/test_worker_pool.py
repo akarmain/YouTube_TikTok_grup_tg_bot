@@ -32,7 +32,7 @@ class FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
 
-    async def send_video(self, chat_id, video, supports_streaming, width, height):
+    async def send_video(self, chat_id, video, supports_streaming, width, height, message_thread_id=None):
         file_id = video if isinstance(video, str) else "NEWFILE"
         self.sent.append({"chat_id": chat_id, "video": video, "width": width, "height": height})
         return FakeSentMessage(video_file_id=file_id)
@@ -58,6 +58,8 @@ class FakeUser:
 
 
 class FakeMessage:
+    is_topic_message = False
+
     def __init__(
         self,
         bot: FakeBot,

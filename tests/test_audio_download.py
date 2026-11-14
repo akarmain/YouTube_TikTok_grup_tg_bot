@@ -46,12 +46,12 @@ class FakeBot:
         self.sent_videos: list[dict] = []
         self.sent_audios: list[dict] = []
 
-    async def send_video(self, chat_id, video, supports_streaming, width, height):
+    async def send_video(self, chat_id, video, supports_streaming, width, height, message_thread_id=None):
         file_id = video if isinstance(video, str) else "NEW_VIDEO_FILE"
         self.sent_videos.append({"chat_id": chat_id, "video": video})
         return FakeSentMessage(video_file_id=file_id)
 
-    async def send_audio(self, chat_id, audio, title=None, performer=None, duration=None, thumbnail=None):
+    async def send_audio(self, chat_id, audio, title=None, performer=None, duration=None, thumbnail=None, message_thread_id=None):
         file_id = audio if isinstance(audio, str) else "NEW_AUDIO_FILE"
         self.sent_audios.append(
             {"chat_id": chat_id, "audio": audio, "title": title, "performer": performer, "duration": duration}
@@ -74,6 +74,8 @@ class FakeUser:
 
 
 class FakeStatusMessage:
+    is_topic_message = False
+
     def __init__(self, bot: FakeBot):
         self.bot = bot
         self.chat = FakeChat()
@@ -87,6 +89,8 @@ class FakeStatusMessage:
 
 
 class FakeMessage:
+    is_topic_message = False
+
     def __init__(
         self,
         bot: FakeBot,
